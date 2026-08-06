@@ -1,0 +1,47 @@
+# --- Build & Output directories (C++ / CMake) ---
+build/
+cmake-build-*/
+bin/
+lib/
+*.out
+*.app
+
+# --- Object files & Compiled Binaries ---
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+
+# --- Generated Code (gRPC / Protobuf) ---
+# Jeśli generujesz pliki .pb.cc / .pb.h wewnątrz drzewa źródłowego:
+*_pb2.py
+*.pb.cc
+*.pb.h
+*.grpc.pb.cc
+*.grpc.pb.h
+
+# --- IDE / Editor configs ---
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosv
+*.sln.docstates
+compile_commands.json
+
+# --- Kubernetes / Helm / Secrets ---
+*.key
+*.crt
+*.pem
+.env
+*.env.*
+secrets.yaml
+values-local.yaml
+
+# --- System & Logs ---
+.DS_Store
+*.log
+*.tmp
