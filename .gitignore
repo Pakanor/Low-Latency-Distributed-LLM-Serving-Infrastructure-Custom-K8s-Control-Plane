@@ -46,3 +46,13 @@ values-local.yaml
 .DS_Store
 *.log
 *.tmp
+
+# --- Python Build & Packaging Artifacts ---
+*.egg-info/
+*.so
+build/
+dist/
+.wheels/
+
+# --- Temporary Test Scripts ---
+test_alloc.py
