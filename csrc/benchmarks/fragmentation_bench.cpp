@@ -30,7 +30,7 @@ int main() {
     std::cout << "Requests: " << NUM_REQUESTS << " | Head Dim: " << HIDDEN_DIM << " | Page Size: " << BLOCK_SIZE << " tokens\n\n";
 
     std::mt19937 rng(42);
-    std::uniform_int_distribution<size_t> dist(16, MAX_TOKENS_PER_REQ); //rozklad prawdopodobienstwa kazda liczba taka sama szanse na wylosowanie
+    std::uniform_int_distribution<size_t> dist(16, MAX_TOKENS_PER_REQ); 
 
     std::vector<size_t> target_lengths(NUM_REQUESTS);
     for (size_t i = 0; i < NUM_REQUESTS; ++i) {
