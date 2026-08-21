@@ -52,3 +52,38 @@ class PagedKVCacheManager:
 
     def free_sequence(self, table: llm_allocator_cpp.SequenceBlockTable):
         table.release(self.allocator)
+
+
+    def build_block_tables(
+        self,
+        tables: list[llm_allocator_cpp.SequenceBlockTable]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        
+        batch_size = len(tables)
+        if batch_size == 0:
+            return (
+                torch.empty((0, 0), dtype=torch.int32, device=self.key_cache.device),
+                torch.empty((0,), dtype=torch.int32, device=self.key_cache.device)
+            )
+
+        raw_block_tables = [table.get_physical_blocks() for table in tables]
+        context_lens_list = [table.get_tokens_count() for table in tables]
+
+        max_blocks = max(len(blocks) for blocks in raw_block_tables)
+
+        block_tables_cpu = torch.full(
+            (batch_size, max_blocks),
+            fill_value=-1,
+            dtype=torch.int32
+        )
+
+        for i, blocks in enumerate(raw_block_tables):
+            if blocks:
+                block_tables_cpu[i, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
+
+        context_lens_cpu = torch.tensor(context_lens_list, dtype=torch.int32)
+
+        return (
+            block_tables_cpu.to(self.key_cache.device),
+            context_lens_cpu.to(self.key_cache.device)
+        )
