@@ -94,3 +94,40 @@ class PagedKVCacheManager:
             block_tables_cpu.to(self.device),
             context_lens_cpu.to(self.device)
         )
+
+
+    def allocate_and_write_prefix(
+        self,
+        table: llm_allocator_cpp.SequenceBlockTable,
+        keys: torch.Tensor,
+        values: torch.Tensor
+    ) -> torch.Tensor:
+
+        if keys.shape != values.shape:
+            raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
+            
+        seq_len = keys.shape[0]
+        if seq_len == 0:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        num_blocks_needed = (seq_len + self.block_size - 1) // self.block_size
+
+        physical_blocks = self.allocator.allocate_blocks(num_blocks_needed)
+
+        for block_id in physical_blocks:
+            table.append_block(block_id)
+
+        block_offsets = torch.tensor(
+            physical_blocks, dtype=torch.long, device=self.device
+        ) * self.block_size
+        slot_offsets = torch.arange(
+            self.block_size, dtype=torch.long, device=self.device
+        )
+
+        all_slots = (block_offsets.unsqueeze(1) + slot_offsets.unsqueeze(0)).flatten()
+        slot_mapping = all_slots[:seq_len]
+
+        self.key_cache.view(-1, self.num_heads, self.head_dim)[slot_mapping] = keys
+        self.value_cache.view(-1, self.num_heads, self.head_dim)[slot_mapping] = values
+
+        return slot_mapping

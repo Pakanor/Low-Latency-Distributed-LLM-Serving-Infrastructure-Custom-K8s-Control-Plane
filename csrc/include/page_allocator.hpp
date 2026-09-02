@@ -40,6 +40,22 @@ public:
         return block_id;
     }
 
+    std::vector<int> allocate_blocks(size_t count) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (free_blocks_.size() < count) {
+            throw std::runtime_error("Out of Memory: Not enough free blocks available in KV-Cache pool!");
+        }
+        std::vector<int> allocated;
+        allocated.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            int block_id = free_blocks_.front();
+            free_blocks_.pop();
+            blocks_[block_id].ref_count = 1;
+            allocated.push_back(block_id);
+        }
+        return allocated;
+    }
+
     void share_block(int block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(block_id);
@@ -104,6 +120,10 @@ public:
     SequenceBlockTable& operator=(SequenceBlockTable&&) noexcept = default;
 
     ~SequenceBlockTable() = default;
+
+    void append_block(int block_id) {
+        physical_blocks_.push_back(block_id);
+    }
 
     void append_token(PageAllocator& allocator) {
         if (tokens_count_ % block_size_ == 0) {

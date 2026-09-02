@@ -43,6 +43,49 @@ def test_build_block_tables():
     assert block_tables[1, 1].item() == -1
 
 
+def test_allocate_and_write_prefix_partial_block():
+    total_blocks = 10
+    block_size = 16
+    num_heads = 4
+    head_dim = 32
+    seq_len = 25  
+
+    manager = PagedKVCacheManager(
+        total_blocks=total_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        dtype=torch.float32,
+        device="cpu"
+    )
+
+    table = manager.create_sequence_table()
+
+    keys = torch.randn((seq_len, num_heads, head_dim), dtype=torch.float32)
+    values = torch.randn((seq_len, num_heads, head_dim), dtype=torch.float32)
+
+    slot_mapping = manager.allocate_and_write_prefix(table, keys, values)
+
+    physical_blocks = table.get_physical_blocks()
+    assert len(physical_blocks) == 2, f"Oczekiwano 2 bloków, dostano {len(physical_blocks)}"
+
+    assert slot_mapping.shape[0] == seq_len, f"Oczekiwano {seq_len} slotów, dostano {slot_mapping.shape[0]}"
+
+   
+    expected_block_0 = torch.arange(0, 16)
+    expected_block_1 = torch.arange(16, 25)
+    expected_slots = torch.cat([expected_block_0, expected_block_1])
+    assert torch.equal(slot_mapping, expected_slots), "Błąd w wyliczaniu wektora slot_mapping!"
+
+    flat_key_cache = manager.key_cache.view(-1, num_heads, head_dim)
+    flat_val_cache = manager.value_cache.view(-1, num_heads, head_dim)
+
+    assert torch.equal(flat_key_cache[slot_mapping], keys), "Key cache zgubił dane przy zapisie!"
+    assert torch.equal(flat_val_cache[slot_mapping], values), "Value cache zgubił dane przy zapisie!"
+
+    print("\n[OK] Test Prefill (Bulk Write) przeszedł pomyślnie!")
+
+
 if __name__ == "__main__":
     test_paged_kv_cache_manager()
     test_build_block_tables()
