@@ -13,12 +13,13 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    def __init__(self, seq_id: int, prompt_token_ids: list[int]) -> None:
+    def __init__(self, seq_id: int, prompt_token_ids: list[int], max_tokens: int = 128) -> None:
         self.seq_id = seq_id
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: list[int] = []
         self.status = SequenceStatus.WAITING
         self.created_time = time.time()
+        self.max_tokens = max_tokens
         self.block_table: Optional[llm_allocator_cpp.SequenceBlockTable] = None
 
     @property
@@ -37,8 +38,12 @@ class Sequence:
             raise RuntimeError("Blocks not initialized - call init_blocks() first")
         self.output_token_ids.append(token_id)
         self.block_table.append_token(allocator)
+        
+        if len(self.output_token_ids) >= self.max_tokens:
+            self.status = SequenceStatus.FINISHED
 
     def free_blocks(self, allocator: llm_allocator_cpp.PageAllocator) -> None:
+        """Zwalnia wszystkie przydzielone bloki w C++."""
         if self.block_table is not None:
             self.block_table.release(allocator)
             self.block_table = None

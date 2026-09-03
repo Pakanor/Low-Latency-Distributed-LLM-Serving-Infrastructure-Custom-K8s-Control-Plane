@@ -9,7 +9,7 @@ sys.path.insert(0, '/home/roberto/llm-infra')
 tests = [
     'tests/test_sequence.py',
     'test_alloc.py',
-    'tests/test_kv_cache_manager.py',
+    'tests/test_scheduler.py',
 ]
 
 print("=" * 60)
