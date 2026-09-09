@@ -57,7 +57,6 @@ class PagedKVCacheManager:
         if seq.block_table is not None:
             seq.block_table.release(self.allocator)
             seq.block_table = None
-        seq.status = SequenceStatus.FINISHED
 
     def write_prefix_kv(
         self,
@@ -65,7 +64,6 @@ class PagedKVCacheManager:
         keys: torch.Tensor,
         values: torch.Tensor
     ) -> torch.Tensor:
-        """Zapisuje całą sekwencję aktywacji K/V z fazy Prefill."""
         if keys.shape != values.shape:
             raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
             
@@ -96,7 +94,6 @@ class PagedKVCacheManager:
         key_token: torch.Tensor,
         value_token: torch.Tensor
     ) -> None:
-        """Zapisuje 1 token w fazie Decode."""
         assert seq.block_table is not None
         token_index = seq.block_table.get_tokens_count() - 1
         physical_blocks = seq.block_table.get_physical_blocks()
@@ -141,6 +138,6 @@ class PagedKVCacheManager:
                 
         context_lens_cpu = torch.tensor(context_lens_list, dtype=torch.int32)
         return (
-            block_tables_cpu.to(self.device),
-            context_lens_cpu.to(self.device)
+            block_tables_cpu.to(self.device, non_blocking=True),
+            context_lens_cpu.to(self.device, non_blocking=True)
         )

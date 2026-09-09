@@ -10,6 +10,7 @@ tests = [
     'tests/test_sequence.py',
     'test_alloc.py',
     'tests/test_scheduler.py',
+    'tests/test_llm_engine.py',
 ]
 
 print("=" * 60)

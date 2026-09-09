@@ -38,6 +38,8 @@ class Scheduler:
         block_size = self.kv_cache_manager.block_size
 
         running_to_keep: List[Sequence] = []
+        preempted_in_this_step: List[Sequence] = []
+
         for seq in self.running:
             if seq.status == SequenceStatus.FINISHED:
                 self.kv_cache_manager.free_sequence(seq)
@@ -49,7 +51,7 @@ class Scheduler:
             if need_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self.kv_cache_manager.free_sequence(seq)
-                self.waiting.insert(0, seq)
+                preempted_in_this_step.append(seq)
             else:
                 if need_new_block:
                     self.kv_cache_manager.allocate_slot_for_next_token(seq)
@@ -59,10 +61,14 @@ class Scheduler:
 
         self.running = running_to_keep
 
+        for seq in reversed(preempted_in_this_step):
+            self.waiting.insert(0, seq)
+
         num_free_blocks = self.allocator.get_num_free_blocks()
         scheduled_prefills: List[Sequence] = []
         curr_batch_size = len(scheduled_decodes)
-        curr_tokens = 0
+        
+        curr_tokens = len(scheduled_decodes)
 
         while self.waiting and curr_batch_size < self.max_batch_size:
             seq = self.waiting[0]

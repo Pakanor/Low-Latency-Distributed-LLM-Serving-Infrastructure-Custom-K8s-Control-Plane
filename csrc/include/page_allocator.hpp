@@ -81,14 +81,14 @@ public:
 
     size_t get_block_size() const { return block_size_; }
 
-    size_t get_num_free_blocks() {
+    size_t get_num_free_blocks() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return free_blocks_.size();
     }
 
     size_t get_total_blocks() const { return total_blocks_; }
 
-    double get_utilization_percentage() {
+    double get_utilization_percentage() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (total_blocks_ == 0) return 0.0;
         return 100.0 * (total_blocks_ - free_blocks_.size()) / total_blocks_;
@@ -105,21 +105,42 @@ private:
     size_t block_size_;
     std::vector<Block> blocks_;
     std::queue<int> free_blocks_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
 
 class SequenceBlockTable {
 public:
     explicit SequenceBlockTable(PageAllocator& allocator) 
-        : block_size_(allocator.get_block_size()) {}
+        : allocator_(&allocator), block_size_(allocator.get_block_size()) {}
 
     SequenceBlockTable(const SequenceBlockTable&) = delete;
     SequenceBlockTable& operator=(const SequenceBlockTable&) = delete;
 
-    SequenceBlockTable(SequenceBlockTable&&) noexcept = default;
-    SequenceBlockTable& operator=(SequenceBlockTable&&) noexcept = default;
+    SequenceBlockTable(SequenceBlockTable&& other) noexcept 
+        : allocator_(other.allocator_),
+          block_size_(other.block_size_),
+          tokens_count_(other.tokens_count_),
+          physical_blocks_(std::move(other.physical_blocks_)) {
+        other.allocator_ = nullptr;
+        other.tokens_count_ = 0;
+    }
 
-    ~SequenceBlockTable() = default;
+    SequenceBlockTable& operator=(SequenceBlockTable&& other) noexcept {
+        if (this != &other) {
+            release_internal();
+            allocator_ = other.allocator_;
+            block_size_ = other.block_size_;
+            tokens_count_ = other.tokens_count_;
+            physical_blocks_ = std::move(other.physical_blocks_);
+            other.allocator_ = nullptr;
+            other.tokens_count_ = 0;
+        }
+        return *this;
+    }
+
+    ~SequenceBlockTable() {
+        release_internal();
+    }
 
     void append_block(int block_id) {
         physical_blocks_.push_back(block_id);
@@ -145,6 +166,17 @@ public:
     size_t get_tokens_count() const { return tokens_count_; }
 
 private:
+    void release_internal() {
+        if (allocator_ != nullptr) {
+            for (int block_id : physical_blocks_) {
+                allocator_->free_block(block_id);
+            }
+            physical_blocks_.clear();
+            tokens_count_ = 0;
+        }
+    }
+
+    PageAllocator* allocator_{nullptr};
     size_t block_size_;
     size_t tokens_count_{0};
     std::vector<int> physical_blocks_;
@@ -152,4 +184,4 @@ private:
 
 } 
 
-#endif 
+#endif
