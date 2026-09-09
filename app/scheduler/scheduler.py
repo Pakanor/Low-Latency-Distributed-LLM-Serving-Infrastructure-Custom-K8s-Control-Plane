@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List
 from app.scheduler.sequence import Sequence, SequenceStatus
-import llm_allocator_cpp
+from app.memory.manager import PagedKVCacheManager
 
 
 @dataclass
@@ -14,11 +14,12 @@ class SchedulerOutputs:
 class Scheduler:
     def __init__(
         self,
-        allocator: llm_allocator_cpp.PageAllocator,
+        kv_cache_manager: PagedKVCacheManager,
         max_batch_size: int = 8,
         max_num_batched_tokens: int = 2048
     ) -> None:
-        self.allocator = allocator
+        self.kv_cache_manager = kv_cache_manager
+        self.allocator = kv_cache_manager.get_allocator()
         self.max_batch_size = max_batch_size
         self.max_num_batched_tokens = max_num_batched_tokens
 
@@ -34,12 +35,12 @@ class Scheduler:
 
     def schedule(self) -> SchedulerOutputs:
         scheduled_decodes: List[Sequence] = []
-        block_size = self.allocator.get_block_size()
+        block_size = self.kv_cache_manager.block_size
 
         running_to_keep: List[Sequence] = []
         for seq in self.running:
             if seq.status == SequenceStatus.FINISHED:
-                seq.free_blocks(self.allocator)
+                self.kv_cache_manager.free_sequence(seq)
                 continue
 
             current_tokens = seq.total_len
@@ -47,13 +48,11 @@ class Scheduler:
 
             if need_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
-                seq.free_blocks(self.allocator)
+                self.kv_cache_manager.free_sequence(seq)
                 self.waiting.insert(0, seq)
             else:
                 if need_new_block:
-                    assert seq.block_table is not None
-                    block_id = self.allocator.allocate_block()
-                    seq.block_table.append_block(block_id)
+                    self.kv_cache_manager.allocate_slot_for_next_token(seq)
                 
                 scheduled_decodes.append(seq)
                 running_to_keep.append(seq)
@@ -77,16 +76,8 @@ class Scheduler:
                 break
 
             seq = self.waiting.pop(0)
-            seq.init_blocks(self.allocator)
-            assert seq.block_table is not None
-
-            currently_allocated = len(seq.block_table.get_physical_blocks())
-            needed = blocks_needed - currently_allocated
-
-            if needed > 0:
-                block_ids = self.allocator.allocate_blocks(needed)
-                for b_id in block_ids:
-                    seq.block_table.append_block(b_id)
+            
+            self.kv_cache_manager.allocate_prefix_blocks(seq)
 
             seq.status = SequenceStatus.RUNNING
 

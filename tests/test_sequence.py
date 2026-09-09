@@ -1,24 +1,24 @@
 from app.scheduler.sequence import Sequence, SequenceStatus
-import llm_allocator_cpp
 
 
-def test_sequence_lifecycle_and_allocation():
-    allocator = llm_allocator_cpp.PageAllocator(total_blocks=4, block_size=16)
-    seq = Sequence(seq_id=1, prompt_token_ids=[10] * 20)  
-
+def test_sequence_lifecycle():
+    seq = Sequence(seq_id=1, prompt_token_ids=[101, 102, 103], max_tokens=2)
+    
+    assert seq.seq_id == 1
+    assert seq.total_len == 3
     assert seq.status == SequenceStatus.WAITING
     assert seq.block_table is None
 
-    seq.init_blocks(allocator)
-    assert seq.block_table is not None
-    assert allocator.get_num_free_blocks() == 2
+    seq.append_token(201)
+    assert seq.total_len == 4
+    assert seq.status == SequenceStatus.WAITING
 
-    # Zwalnianie zasobów
-    seq.free_blocks(allocator)
-    assert seq.block_table is None
-    assert allocator.get_num_free_blocks() == 4
+    # Dodanie 2. tokena wyjściowego (osiągnięcie max_tokens=2)
+    seq.append_token(202)
+    assert seq.total_len == 5
+    assert seq.status == SequenceStatus.FINISHED
 
 
 if __name__ == "__main__":
-    test_sequence_lifecycle_and_allocation()
-    print("✓ Test sequence lifecycle przeszedł pomyślnie!")
+    test_sequence_lifecycle()
+    print("test_sequence.py PASSED")
