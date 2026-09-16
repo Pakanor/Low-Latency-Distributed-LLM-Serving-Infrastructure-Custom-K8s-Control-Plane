@@ -7,10 +7,10 @@ os.chdir('/home/roberto/llm-infra')
 sys.path.insert(0, '/home/roberto/llm-infra')
 
 tests = [
-    'tests/test_sequence.py',
-    'test_alloc.py',
-    'tests/test_scheduler.py',
-    'tests/test_llm_engine.py',
+        "tests/test_sequence.py",
+        "tests/test_kv_cache_manager.py",
+        "tests/test_scheduler.py",
+        "tests/test_llm_engine.py",
 ]
 
 print("=" * 60)
