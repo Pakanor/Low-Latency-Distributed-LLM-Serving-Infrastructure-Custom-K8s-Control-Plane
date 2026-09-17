@@ -11,6 +11,7 @@ class PagedKVCacheManager:
         block_size: int,
         num_heads: int,
         head_dim: int,
+        total_cpu_blocks: int = 32,
         dtype: torch.dtype = torch.float32,
         device: str = "cpu"
     ) -> None:
@@ -20,7 +21,8 @@ class PagedKVCacheManager:
         self.dtype = dtype
         self.device = device
         
-        self.allocator = llm_allocator_cpp.PageAllocator(total_blocks, block_size)
+        self.allocator = llm_allocator_cpp.PageAllocator(total_blocks, block_size, total_cpu_blocks)
+        self.swapped_seqs = set()
         
         self.key_cache = torch.empty(
             (total_blocks, block_size, num_heads, head_dim),
@@ -141,3 +143,14 @@ class PagedKVCacheManager:
             block_tables_cpu.to(self.device, non_blocking=True),
             context_lens_cpu.to(self.device, non_blocking=True)
         )
+    def swap_out_sequence(self, seq_id: int, block_table: List[int]) -> bool:
+        for block_id in block_table:
+            self.allocator.swap_out(block_id)
+        self.swapped_seqs.add(seq_id)
+        return True
+
+    def swap_in_sequence(self, seq_id: int, block_table: List[int]) -> bool:
+        for block_id in block_table:
+            self.allocator.swap_in(block_id)
+        self.swapped_seqs.remove(seq_id)
+        return True

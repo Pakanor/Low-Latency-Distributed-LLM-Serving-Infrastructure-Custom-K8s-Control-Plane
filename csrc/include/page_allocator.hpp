@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <queue>
+#include <unordered_map>
 #include <stdexcept>
 #include <iostream>
 #include <cstddef>
@@ -18,14 +19,17 @@ struct Block {
 
 class PageAllocator {
 public:
-    PageAllocator(size_t total_blocks, size_t block_size)
-        : total_blocks_(total_blocks), block_size_(block_size) {
+    PageAllocator(size_t total_blocks, size_t block_size, size_t total_cpu_blocks = 32)
+        : total_blocks_(total_blocks), block_size_(block_size), total_cpu_blocks_(total_cpu_blocks) {
         if (block_size == 0) {
             throw std::invalid_argument("block_size must be greater than 0");
         }
         for (size_t i = 0; i < total_blocks_; ++i) {
             free_blocks_.push(static_cast<int>(i));
             blocks_.push_back(Block{static_cast<int>(i), 0});
+        }
+        for (size_t i = 0; i < total_cpu_blocks_; ++i) {
+            cpu_free_blocks_.push_back(static_cast<int>(i));
         }
     }
 
@@ -79,11 +83,55 @@ public:
         }
     }
 
+    void swap_out(int gpu_block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+
+        if (cpu_free_blocks_.empty()) {
+            throw std::runtime_error("OOM: Host RAM Block Pool exhausted during swap out");
+        }
+
+        int cpu_block_id = cpu_free_blocks_.back();
+        cpu_free_blocks_.pop_back();
+
+        gpu_to_cpu_map_[gpu_block_id] = cpu_block_id;
+
+        blocks_[gpu_block_id].ref_count = 0;
+        free_blocks_.push(gpu_block_id);
+    }
+
+    void swap_in(int gpu_block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it == gpu_to_cpu_map_.end()) {
+            throw std::runtime_error("Block ID " + std::to_string(gpu_block_id) + " not found in Host RAM mapping");
+        }
+
+        if (free_blocks_.empty()) {
+            throw std::runtime_error("OOM: No free VRAM blocks available to swap in block " + std::to_string(gpu_block_id));
+        }
+
+        int new_vram_block = free_blocks_.front();
+        free_blocks_.pop();
+        blocks_[new_vram_block].ref_count = 1;
+
+        int cpu_block_id = it->second;
+        cpu_free_blocks_.push_back(cpu_block_id);
+        gpu_to_cpu_map_.erase(it);
+    }
+
     size_t get_block_size() const { return block_size_; }
 
     size_t get_num_free_blocks() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return free_blocks_.size();
+    }
+
+    size_t get_num_free_cpu_blocks() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return cpu_free_blocks_.size();
     }
 
     size_t get_total_blocks() const { return total_blocks_; }
@@ -103,8 +151,11 @@ private:
 
     size_t total_blocks_;
     size_t block_size_;
+    size_t total_cpu_blocks_;
     std::vector<Block> blocks_;
     std::queue<int> free_blocks_;
+    std::vector<int> cpu_free_blocks_;
+    std::unordered_map<int, int> gpu_to_cpu_map_;
     mutable std::mutex mutex_;
 };
 
