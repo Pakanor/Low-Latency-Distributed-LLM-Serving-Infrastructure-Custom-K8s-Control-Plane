@@ -17,7 +17,6 @@ model = None
 tokenizer = None
 
 def load_model():
-    """Load model with error handling."""
     global model, tokenizer
     try:
         logger.info(f"Loading model: {MODEL_NAME}...")
@@ -56,7 +55,6 @@ def health():
 
 @app.post("/generate")
 async def generate(req: GenerateRequest):
-    """Generate text from prompt with error handling."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     

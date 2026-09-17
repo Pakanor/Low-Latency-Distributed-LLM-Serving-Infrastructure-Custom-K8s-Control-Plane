@@ -3,18 +3,18 @@ import torch
 from app.scheduler.sequence import Sequence, SequenceStatus
 from app.scheduler.scheduler import Scheduler
 from app.memory.manager import PagedKVCacheManager
-
+from app.model.client import K8sModelClient
 
 class LLMEngine:
     def __init__(
         self,
         kv_cache_manager: PagedKVCacheManager,
         scheduler: Scheduler,
-        model: Optional[torch.nn.Module] = None
+        model_client: Optional[K8sModelClient] = None
     ) -> None:
         self.kv_cache_manager = kv_cache_manager
         self.scheduler = scheduler
-        self.model = model
+        self.model_client = model_client or K8sModelClient()
         self.seq_counter = 0
 
     def add_request(
@@ -47,45 +47,20 @@ class LLMEngine:
         block_tables, context_lens = self.kv_cache_manager.build_block_tables(all_active_seqs)
 
         for seq in prefills:
-            seq_len = seq.total_len
-            mock_keys = torch.randn(
-                seq_len,
-                self.kv_cache_manager.num_heads,
-                self.kv_cache_manager.head_dim,
-                device=self.kv_cache_manager.device,
-                dtype=self.kv_cache_manager.dtype
+            next_token = self.model_client.generate_step(
+                seq.prompt_token_ids, 
+                seq.output_token_ids,
+                max_tokens=1
             )
-            mock_values = torch.randn(
-                seq_len,
-                self.kv_cache_manager.num_heads,
-                self.kv_cache_manager.head_dim,
-                device=self.kv_cache_manager.device,
-                dtype=self.kv_cache_manager.dtype
-            )
-
-            self.kv_cache_manager.write_prefix_kv(seq, mock_keys, mock_values)
-
-            generated_token = 100 + seq.seq_id
-            seq.append_token(generated_token)
+            seq.append_token(next_token)
 
         for seq in decodes:
-            mock_key_token = torch.randn(
-                self.kv_cache_manager.num_heads,
-                self.kv_cache_manager.head_dim,
-                device=self.kv_cache_manager.device,
-                dtype=self.kv_cache_manager.dtype
+            next_token = self.model_client.generate_step(
+                seq.prompt_token_ids, 
+                seq.output_token_ids,
+                max_tokens=1
             )
-            mock_value_token = torch.randn(
-                self.kv_cache_manager.num_heads,
-                self.kv_cache_manager.head_dim,
-                device=self.kv_cache_manager.device,
-                dtype=self.kv_cache_manager.dtype
-            )
-
-            self.kv_cache_manager.write_single_token_kv(seq, mock_key_token, mock_value_token)
-
-            generated_token = 200 + seq.total_len
-            seq.append_token(generated_token)
+            seq.append_token(next_token)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
         running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
