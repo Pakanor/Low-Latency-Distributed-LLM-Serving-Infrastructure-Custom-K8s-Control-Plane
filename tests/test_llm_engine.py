@@ -1,50 +1,33 @@
-import torch
-import torch.nn as nn
-from app.engine.llm_engine import LLMEngine
+import pytest
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.scheduler import Scheduler
-
-
-class DummyModel(nn.Module):
-    def __init__(self, vocab_size: int = 100):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.linear = nn.Linear(1, vocab_size)
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = input_ids.shape
-        return torch.randn(batch_size, seq_len, self.vocab_size)
+from app.engine.llm_engine import LLMEngine
+from app.model.client import MockModelClient
 
 
 def test_llm_engine_execution():
-    model = DummyModel(vocab_size=100)
-    
     manager = PagedKVCacheManager(
-        total_blocks=16,
+        total_blocks=10,
         block_size=4,
         num_heads=2,
-        head_dim=16
+        head_dim=8,
+        device="cpu"
+    )
+    scheduler = Scheduler(
+        max_batch_size=2,
+        max_num_batched_tokens=32,
+        block_size=4,
+        allocator=manager.get_allocator()
     )
     
-    scheduler = Scheduler(kv_cache_manager=manager, max_batch_size=2)
-    engine = LLMEngine(model=model, kv_cache_manager=manager, scheduler=scheduler)
+    engine = LLMEngine(
+        kv_cache_manager=manager, 
+        scheduler=scheduler,
+        model_client=MockModelClient()
+    )
 
-    req1 = engine.add_request(prompt_token_ids=[10, 20, 30], max_tokens=3)
-    req2 = engine.add_request(prompt_token_ids=[40, 50], max_tokens=2)
+    seq = engine.add_request(prompt_token_ids=[1, 2, 3], max_tokens=2)
+    res = engine.step()
 
-    assert engine.has_unfinished_requests() is True
-
-    step_count = 0
-    while engine.has_unfinished_requests():
-        step_outputs = engine.step()
-        step_count += 1
-        print(f"Krok {step_count}: wygenerowano tokeny: {step_outputs}")
-        
-        if step_count > 10:
-            break
-
-    print("Silnik zakończył przetwarzanie pomyślnie!")
-
-
-if __name__ == "__main__":
-    test_llm_engine_execution()
+    assert len(seq.output_token_ids) == 1
+    assert seq.output_token_ids[0] == 100

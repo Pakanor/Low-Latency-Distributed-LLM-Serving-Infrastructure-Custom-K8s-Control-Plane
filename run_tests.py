@@ -14,7 +14,8 @@ tests = [
         "tests/stress_tests/test_01_memory_oom_preemption.py",
         "tests/stress_tests/test_02_state_concurrency.py",
         "tests/stress_tests/test_03_cuda_layout_ragged.py",
-        "tests/stress_tests/test_04_edge_case.py"
+        "tests/stress_tests/test_04_edge_case.py",
+        "tests/test_k8s_integration.py"
 
 ]
 
