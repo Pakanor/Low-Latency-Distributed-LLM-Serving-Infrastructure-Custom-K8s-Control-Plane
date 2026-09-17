@@ -11,6 +11,7 @@ tests = [
         "tests/test_kv_cache_manager.py",
         "tests/test_scheduler.py",
         "tests/test_llm_engine.py",
+        "tests/stress_tests/test_01_memory_oom_preemption.py"
 ]
 
 print("=" * 60)
