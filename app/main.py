@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import List, Optional, Dict, Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,3 +87,24 @@ async def generate(req: GenerateRequest):
     except Exception as e:
         logger.error(f"Generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+class TensorGenerateRequest(BaseModel):
+    input_ids: List[int]
+    block_table: List[int]
+    context_len: int
+
+@app.post("/generate_step")
+async def generate_step(req: TensorGenerateRequest):
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        with torch.no_grad():
+            inputs = torch.tensor([req.input_ids], dtype=torch.long)
+            outputs = model(inputs)
+            next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
+            
+        return {"next_token_id": next_token_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
