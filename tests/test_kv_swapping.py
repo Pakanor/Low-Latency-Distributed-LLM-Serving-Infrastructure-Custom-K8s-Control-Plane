@@ -18,7 +18,6 @@ def test_kv_cache_swapping_lifecycle():
     assert allocator.get_num_free_blocks() == 2
     assert allocator.get_num_free_cpu_blocks() == 8
     
-    # 2. Wykonujemy Swap Out dla bloku b1
     manager.swap_out_sequence(seq_id=101, block_table=[b1])
     assert 101 in manager.swapped_seqs
     assert allocator.get_num_free_blocks() == 3 

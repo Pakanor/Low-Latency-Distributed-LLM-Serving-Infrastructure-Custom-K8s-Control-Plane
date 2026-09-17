@@ -6,10 +6,7 @@ from app.model.client import K8sModelClient
 
 
 def test_live_k8s_model_generation():
-    """
-    Test integracyjny wywołujący prawdziwy endpoint FastAPI SmolLM w K8s.
-    Dla testów lokalnych używa URL http://localhost:8000/generate lub klustrowego.
-    """
+   
     kv_mgr = PagedKVCacheManager(
         total_blocks=10,
         block_size=4,
@@ -24,8 +21,7 @@ def test_live_k8s_model_generation():
         allocator=kv_mgr.get_allocator()
     )
 
-    # Jeśli testujesz przez `kubectl port-forward svc/llm-engine-service 8000:80`,
-    # podaj URL http://localhost:8000/generate. Wewnątrz klastra podaj URL usługi.
+   
     client = K8sModelClient(
         endpoint_url="http://localhost:8000/generate",
         model_name="HuggingFaceTB/SmolLM-135M-Instruct"
