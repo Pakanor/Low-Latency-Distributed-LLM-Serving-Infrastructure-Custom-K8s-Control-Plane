@@ -16,7 +16,8 @@ tests = [
         "tests/stress_tests/test_03_cuda_layout_ragged.py",
         "tests/stress_tests/test_04_edge_case.py",
         "tests/test_k8s_integration.py",
-        "tests/test_kv_swapping.py"
+        "tests/test_kv_swapping.py",
+        "tests/test_api_server.py"
 
 ]
 

@@ -16,10 +16,13 @@ spec:
     spec:
       containers:
       - name: engine
-        image: llm-baseline:v1
-        imagePullPolicy: Never 
+        image: docker.io/library/llm-baseline:v1
+        imagePullPolicy: Never
         ports:
         - containerPort: 8000
+        env:
+        - name: MODEL_NAME
+          value: "HuggingFaceTB/SmolLM-135M-Instruct"
         resources:
           limits:
             cpu: "2"
@@ -27,31 +30,15 @@ spec:
           requests:
             cpu: "500m"
             memory: "512Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: llm-engine-service
-spec:
-  type: ClusterIP
-  selector:
-    app: llm-engine
-  ports:
-  - port: 80
-    targetPort: 8000
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: llm-ingress
-spec:
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: llm-engine-service
-            port:
-              number: 80
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
