@@ -18,6 +18,8 @@ PYBIND11_MODULE(llm_allocator_cpp, m) {
         .def("free_block", &llm_infra::PageAllocator::free_block, py::arg("block_id"), py::call_guard<py::gil_scoped_release>())
         .def("swap_out", &llm_infra::PageAllocator::swap_out, py::arg("gpu_block_id"), py::call_guard<py::gil_scoped_release>())
         .def("swap_in", &llm_infra::PageAllocator::swap_in, py::arg("gpu_block_id"), py::call_guard<py::gil_scoped_release>())
+        .def("get_cpu_block_id", &llm_infra::PageAllocator::get_cpu_block_id, py::arg("gpu_block_id"), py::call_guard<py::gil_scoped_release>())
+        .def("release_swapped_block", &llm_infra::PageAllocator::release_swapped_block, py::arg("gpu_block_id"), py::call_guard<py::gil_scoped_release>())
         .def("get_block_size", &llm_infra::PageAllocator::get_block_size)
         .def("get_num_free_blocks", &llm_infra::PageAllocator::get_num_free_blocks, py::call_guard<py::gil_scoped_release>())
         .def("get_num_free_cpu_blocks", &llm_infra::PageAllocator::get_num_free_cpu_blocks, py::call_guard<py::gil_scoped_release>())
@@ -31,6 +33,8 @@ PYBIND11_MODULE(llm_allocator_cpp, m) {
         .def("release", [](llm_infra::SequenceBlockTable& self, llm_infra::PageAllocator& alloc) {
             self.release(alloc);
         }, py::arg("allocator"), py::call_guard<py::gil_scoped_release>())
+        .def("replace_block", &llm_infra::SequenceBlockTable::replace_block,
+             py::arg("old_block_id"), py::arg("new_block_id"))
         .def("get_physical_blocks", &llm_infra::SequenceBlockTable::get_physical_blocks)
         .def("get_tokens_count", &llm_infra::SequenceBlockTable::get_tokens_count);
 }

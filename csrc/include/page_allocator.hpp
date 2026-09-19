@@ -4,6 +4,7 @@
 #include <vector>
 #include <queue>
 #include <unordered_map>
+#include <algorithm>
 #include <stdexcept>
 #include <iostream>
 #include <cstddef>
@@ -99,6 +100,12 @@ public:
         validate_block_id(block_id);
 
         if (blocks_[block_id].ref_count <= 0) {
+            auto swapped = gpu_to_cpu_map_.find(block_id);
+            if (swapped != gpu_to_cpu_map_.end()) {
+                cpu_free_blocks_.push_back(swapped->second);
+                gpu_to_cpu_map_.erase(swapped);
+                return;
+            }
             throw std::runtime_error("Double-free or free on unallocated block detected: ID " + std::to_string(block_id));
         }
 
@@ -108,7 +115,7 @@ public:
         }
     }
 
-    uintptr_t swap_out(int gpu_block_id) {
+    int swap_out(int gpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(gpu_block_id);
 
@@ -120,6 +127,10 @@ public:
             throw std::runtime_error("OOM: Host RAM Block Pool exhausted during swap out");
         }
 
+        if (gpu_to_cpu_map_.find(gpu_block_id) != gpu_to_cpu_map_.end()) {
+            throw std::runtime_error("Block is already swapped out: " + std::to_string(gpu_block_id));
+        }
+
         int cpu_block_id = cpu_free_blocks_.back();
         cpu_free_blocks_.pop_back();
 
@@ -128,11 +139,10 @@ public:
         blocks_[gpu_block_id].ref_count = 0;
         free_blocks_.push(gpu_block_id);
 
-        void* host_ptr = cpu_block_ptrs_[cpu_block_id];
-        return reinterpret_cast<uintptr_t>(host_ptr);
+        return cpu_block_id;
     }
 
-    uintptr_t swap_in(int gpu_block_id) {
+    int swap_in(int gpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(gpu_block_id);
 
@@ -150,12 +160,31 @@ public:
         blocks_[new_vram_block].ref_count = 1;
 
         int cpu_block_id = it->second;
-        void* host_ptr = cpu_block_ptrs_[cpu_block_id];
-
         cpu_free_blocks_.push_back(cpu_block_id);
         gpu_to_cpu_map_.erase(it);
 
-        return reinterpret_cast<uintptr_t>(host_ptr);
+        return new_vram_block;
+    }
+
+    int get_cpu_block_id(int gpu_block_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it == gpu_to_cpu_map_.end()) {
+            throw std::runtime_error("Block " + std::to_string(gpu_block_id) + " is not swapped out");
+        }
+        return it->second;
+    }
+
+    void release_swapped_block(int gpu_block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it == gpu_to_cpu_map_.end()) {
+            throw std::runtime_error("Block " + std::to_string(gpu_block_id) + " is not swapped out");
+        }
+        cpu_free_blocks_.push_back(it->second);
+        gpu_to_cpu_map_.erase(it);
     }
 
     uintptr_t get_host_ptr(int gpu_block_id) const {
@@ -244,7 +273,21 @@ public:
     }
 
     void append_block(int block_id) {
+        if (block_id < 0 || static_cast<size_t>(block_id) >= allocator_->get_total_blocks()) {
+            throw std::out_of_range("Block ID out of range: " + std::to_string(block_id));
+        }
         physical_blocks_.push_back(block_id);
+    }
+
+    void replace_block(int old_block_id, int new_block_id) {
+        if (new_block_id < 0 || static_cast<size_t>(new_block_id) >= allocator_->get_total_blocks()) {
+            throw std::out_of_range("Block ID out of range: " + std::to_string(new_block_id));
+        }
+        auto it = std::find(physical_blocks_.begin(), physical_blocks_.end(), old_block_id);
+        if (it == physical_blocks_.end()) {
+            throw std::runtime_error("Block ID " + std::to_string(old_block_id) + " not found in block table");
+        }
+        *it = new_block_id;
     }
 
     void append_token(PageAllocator& allocator) {
