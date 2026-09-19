@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 
@@ -19,24 +21,47 @@ struct Block {
 
 class PageAllocator {
 public:
-    PageAllocator(size_t total_blocks, size_t block_size, size_t total_cpu_blocks = 32)
-        : total_blocks_(total_blocks), block_size_(block_size), total_cpu_blocks_(total_cpu_blocks) {
-        if (block_size == 0) {
+    PageAllocator(size_t total_blocks, size_t block_size_bytes, size_t total_cpu_blocks = 32)
+        : total_blocks_(total_blocks), block_size_(block_size_bytes), total_cpu_blocks_(total_cpu_blocks) {
+        if (block_size_bytes == 0) {
             throw std::invalid_argument("block_size must be greater than 0");
         }
+
+        
+        size_t total_ram_bytes = total_cpu_blocks_ * block_size_;
+        int ret = posix_memalign(&base_host_ptr_, 4096, total_ram_bytes);
+        if (ret != 0 || !base_host_ptr_) {
+            throw std::bad_alloc();
+        }
+
+        uint8_t* byte_ptr = static_cast<uint8_t*>(base_host_ptr_);
+
         for (size_t i = 0; i < total_blocks_; ++i) {
             free_blocks_.push(static_cast<int>(i));
             blocks_.push_back(Block{static_cast<int>(i), 0});
         }
+
+        // Przypisanie fizycznych wskaźników RAM do bloków swapowych
+        cpu_block_ptrs_.resize(total_cpu_blocks_);
         for (size_t i = 0; i < total_cpu_blocks_; ++i) {
             cpu_free_blocks_.push_back(static_cast<int>(i));
+            cpu_block_ptrs_[i] = byte_ptr + (i * block_size_);
         }
     }
+
+    ~PageAllocator() {
+        if (base_host_ptr_) {
+            free(base_host_ptr_);
+        }
+    }
+
+    PageAllocator(const PageAllocator&) = delete;
+    PageAllocator& operator=(const PageAllocator&) = delete;
 
     int allocate_block() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (free_blocks_.empty()) {
-            throw std::runtime_error("Out of Memory: No free DRAM pages available in KV-Cache pool!");
+            throw std::runtime_error("Out of Memory: No free VRAM pages available in KV-Cache pool!");
         }
         int block_id = free_blocks_.front();
         free_blocks_.pop();
@@ -83,9 +108,13 @@ public:
         }
     }
 
-    void swap_out(int gpu_block_id) {
+    uintptr_t swap_out(int gpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(gpu_block_id);
+
+        if (blocks_[gpu_block_id].ref_count != 1) {
+            throw std::runtime_error("Cannot swap out block with ref_count != 1");
+        }
 
         if (cpu_free_blocks_.empty()) {
             throw std::runtime_error("OOM: Host RAM Block Pool exhausted during swap out");
@@ -98,9 +127,12 @@ public:
 
         blocks_[gpu_block_id].ref_count = 0;
         free_blocks_.push(gpu_block_id);
+
+        void* host_ptr = cpu_block_ptrs_[cpu_block_id];
+        return reinterpret_cast<uintptr_t>(host_ptr);
     }
 
-    void swap_in(int gpu_block_id) {
+    uintptr_t swap_in(int gpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(gpu_block_id);
 
@@ -118,8 +150,22 @@ public:
         blocks_[new_vram_block].ref_count = 1;
 
         int cpu_block_id = it->second;
+        void* host_ptr = cpu_block_ptrs_[cpu_block_id];
+
         cpu_free_blocks_.push_back(cpu_block_id);
         gpu_to_cpu_map_.erase(it);
+
+        return reinterpret_cast<uintptr_t>(host_ptr);
+    }
+
+    uintptr_t get_host_ptr(int gpu_block_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it == gpu_to_cpu_map_.end()) {
+            return 0;
+        }
+        return reinterpret_cast<uintptr_t>(cpu_block_ptrs_[it->second]);
     }
 
     size_t get_block_size() const { return block_size_; }
@@ -152,6 +198,10 @@ private:
     size_t total_blocks_;
     size_t block_size_;
     size_t total_cpu_blocks_;
+    
+    void* base_host_ptr_{nullptr};
+    std::vector<void*> cpu_block_ptrs_;
+
     std::vector<Block> blocks_;
     std::queue<int> free_blocks_;
     std::vector<int> cpu_free_blocks_;
