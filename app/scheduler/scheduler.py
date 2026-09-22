@@ -92,15 +92,18 @@ class Scheduler:
 
         self.running = active_running
         current_batch_tokens = len(scheduled_decodes)
+        ignored: List[Sequence] = []
 
-        while self.waiting and len(self.running) < self.max_batch_size:
+        while self.waiting:
             seq = self.waiting[0]
             seq_len = seq.total_len
             needed_blocks = (seq_len + self.block_size - 1) // self.block_size
             if needed_blocks > self.allocator.get_num_free_blocks():
-                break
+                ignored.append(self.waiting.pop(0))
+                continue
             if current_batch_tokens + seq_len > self.max_num_batched_tokens:
-                break
+                ignored.append(self.waiting.pop(0))
+                continue
 
             self.waiting.pop(0)
             self._allocate_prefix(seq)
@@ -112,7 +115,7 @@ class Scheduler:
         return SchedulerOutputs(
             scheduled_prefills=scheduled_prefills,
             scheduled_decodes=scheduled_decodes,
-            ignored_sequences=[],
+            ignored_sequences=ignored,
         )
 
     def free_sequence(self, seq: Sequence) -> None:

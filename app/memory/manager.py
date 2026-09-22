@@ -152,5 +152,6 @@ class PagedKVCacheManager:
     def swap_in_sequence(self, seq_id: int, block_table: List[int]) -> bool:
         for block_id in block_table:
             self.allocator.swap_in(block_id)
-        self.swapped_seqs.remove(seq_id)
+        if seq_id in self.swapped_seqs:
+            self.swapped_seqs.remove(seq_id)
         return True
