@@ -62,8 +62,7 @@ async def generate(req: GenerateRequest):
     try:
         with torch.no_grad():
             inputs = tokenizer(req.prompt, return_tensors="pt")
-            
-            # Validate input length
+
             if inputs.input_ids.shape[1] > 2000:
                 raise HTTPException(status_code=400, detail="Prompt too long")
             
