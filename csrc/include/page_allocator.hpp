@@ -42,7 +42,6 @@ public:
             blocks_.push_back(Block{static_cast<int>(i), 0});
         }
 
-        // Przypisanie fizycznych wskaźników RAM do bloków swapowych
         cpu_block_ptrs_.resize(total_cpu_blocks_);
         for (size_t i = 0; i < total_cpu_blocks_; ++i) {
             cpu_free_blocks_.push_back(static_cast<int>(i));
