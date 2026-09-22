@@ -17,7 +17,6 @@ fragmentation_bench
 *.dylib
 
 # --- Generated Code (gRPC / Protobuf) ---
-# Jeśli generujesz pliki .pb.cc / .pb.h wewnątrz drzewa źródłowego:
 *_pb2.py
 *.pb.cc
 *.pb.h
@@ -59,3 +58,8 @@ test_alloc.py__pycache__/
 *.pyc
 __pycache__/
 *.pyc
+
+# --- Analysis & Context Files (excluded from git) ---
+ANALYSIS_CONTEXT.md
+*_ANALYSIS.md
+*_CONTEXT.md
