@@ -65,10 +65,10 @@ class LLMEngine:
             )
             next_token = result["next_token_id"]
             seq.append_token(next_token)
-            key_tensor = result.get("key")
-            value_tensor = result.get("value")
-            if key_tensor is not None and value_tensor is not None:
-                self.kv_cache_manager.write_single_token_kv(seq, key_tensor, value_tensor)
+            keys_tensor = result.get("keys")
+            values_tensor = result.get("values")
+            if keys_tensor is not None and values_tensor is not None:
+                self.kv_cache_manager.write_prefix_kv(seq, keys_tensor, values_tensor)
 
         for i, seq in enumerate(decodes):
             row = len(prefills) + i

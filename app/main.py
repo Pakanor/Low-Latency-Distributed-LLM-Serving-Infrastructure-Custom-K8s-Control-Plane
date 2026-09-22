@@ -104,16 +104,30 @@ async def generate_step(req: TensorGenerateRequest):
             outputs = model(inputs)
             next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
             
-            key_tensor = None
-            value_tensor = None
+            keys_list = None
+            values_list = None
+            key_list = None
+            value_list = None
             past_kv = getattr(outputs, "past_key_values", None)
             if past_kv is not None and len(past_kv) > 0:
                 last_layer = past_kv[-1]
-                key = last_layer[0][:, :, -1:, :]
-                value = last_layer[1][:, :, -1:, :]
-                key_tensor = key.squeeze(0).squeeze(-2)
-                value_tensor = value.squeeze(0).squeeze(-2)
+                all_keys = last_layer[0][:, :, :]
+                all_values = last_layer[1][:, :, :]
+                all_keys = all_keys.squeeze(0).permute(2, 0, 1)
+                all_values = all_values.squeeze(0).permute(2, 0, 1)
+                keys_list = all_keys.tolist()
+                values_list = all_values.tolist()
+                last_key = all_keys[-1:, :, :]
+                last_value = all_values[-1:, :, :]
+                key_list = last_key.squeeze(0).squeeze(-2).tolist()
+                value_list = last_value.squeeze(0).squeeze(-2).tolist()
             
-        return {"next_token_id": next_token_id, "key": key_tensor, "value": value_tensor}
+        return {
+            "next_token_id": next_token_id,
+            "keys": keys_list,
+            "values": values_list,
+            "key": key_list,
+            "value": value_list,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -48,10 +48,22 @@ class K8sModelClient:
         
         with urllib.request.urlopen(req, timeout=5) as response:
             result = json.loads(response.read().decode("utf-8"))
+            keys = None
+            values = None
+            key = None
+            value = None
+            if result.get("keys") and result.get("values"):
+                keys = torch.tensor(result["keys"])
+                values = torch.tensor(result["values"])
+            if result.get("key") and result.get("value"):
+                key = torch.tensor(result["key"])
+                value = torch.tensor(result["value"])
             return {
                 "next_token_id": result["next_token_id"],
-                "key": result.get("key"),
-                "value": result.get("value"),
+                "keys": keys,
+                "values": values,
+                "key": key,
+                "value": value,
             }
 
 class MockModelClient:
@@ -61,4 +73,16 @@ class MockModelClient:
         block_table: List[int],
         context_len: int
     ) -> dict:
-        return {"next_token_id": 100 + len(input_ids), "key": None, "value": None}
+        import torch as _torch
+        seq_len = len(input_ids)
+        keys = _torch.zeros(seq_len, 2, 8)
+        values = _torch.zeros(seq_len, 2, 8)
+        last_key = keys[-1:, :, :]
+        last_value = values[-1:, :, :]
+        return {
+            "next_token_id": 100 + seq_len,
+            "keys": keys,
+            "values": values,
+            "key": last_key.squeeze(0).squeeze(-2),
+            "value": last_value.squeeze(0).squeeze(-2),
+        }
