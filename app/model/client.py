@@ -5,10 +5,26 @@ from typing import List, Optional
 
 class K8sModelClient:
     def __init__(
-        self, 
-        endpoint_url: str = "http://llm-engine-service.default.svc.cluster.local/generate_step"
+        self,
+        endpoint_url: str = "http://llm-engine-service.default.svc.cluster.local/generate_step",
+        model_name: Optional[str] = None,
     ) -> None:
         self.endpoint_url = endpoint_url
+        self.model_name = model_name
+        try:
+            from transformers import AutoTokenizer
+
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name or "HuggingFaceTB/SmolLM-135M-Instruct")
+        except Exception:
+            class _FallbackTokenizer:
+                def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
+                    return [ord(c) for c in text]
+
+                @property
+                def eos_token_id(self) -> int:
+                    return 0
+
+            self.tokenizer = _FallbackTokenizer()
 
     def generate_step_tensor(
         self, 
