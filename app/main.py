@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ async def generate(req: GenerateRequest):
             "tokens_generated": outputs.shape[1] - inputs.input_ids.shape[1],
         }
     
-    except torch.cuda.OutOfMemoryError:
+    except torch.OutOfMemoryError:
         logger.error("CUDA OOM during generation")
         raise HTTPException(status_code=507, detail="Out of GPU memory")
     except Exception as e:
