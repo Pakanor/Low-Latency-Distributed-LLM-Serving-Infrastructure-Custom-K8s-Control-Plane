@@ -104,6 +104,16 @@ async def generate_step(req: TensorGenerateRequest):
             outputs = model(inputs)
             next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
             
-        return {"next_token_id": next_token_id}
+            key_tensor = None
+            value_tensor = None
+            past_kv = getattr(outputs, "past_key_values", None)
+            if past_kv is not None and len(past_kv) > 0:
+                last_layer = past_kv[-1]
+                key = last_layer[0][:, :, -1:, :]
+                value = last_layer[1][:, :, -1:, :]
+                key_tensor = key.squeeze(0).squeeze(-2)
+                value_tensor = value.squeeze(0).squeeze(-2)
+            
+        return {"next_token_id": next_token_id, "key": key_tensor, "value": value_tensor}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

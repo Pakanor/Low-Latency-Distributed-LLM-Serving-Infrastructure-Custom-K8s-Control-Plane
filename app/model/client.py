@@ -27,11 +27,11 @@ class K8sModelClient:
             self.tokenizer = _FallbackTokenizer()
 
     def generate_step_tensor(
-        self, 
-        input_ids: List[int], 
-        block_table: List[int], 
+        self,
+        input_ids: List[int],
+        block_table: List[int],
         context_len: int
-    ) -> int:
+    ) -> dict:
         
         payload = {
             "input_ids": input_ids,
@@ -48,13 +48,17 @@ class K8sModelClient:
         
         with urllib.request.urlopen(req, timeout=5) as response:
             result = json.loads(response.read().decode("utf-8"))
-            return result["next_token_id"]
+            return {
+                "next_token_id": result["next_token_id"],
+                "key": result.get("key"),
+                "value": result.get("value"),
+            }
 
 class MockModelClient:
     def generate_step_tensor(
-        self, 
-        input_ids: List[int], 
-        block_table: List[int], 
+        self,
+        input_ids: List[int],
+        block_table: List[int],
         context_len: int
-    ) -> int:
-        return 100 + len(input_ids)
+    ) -> dict:
+        return {"next_token_id": 100 + len(input_ids), "key": None, "value": None}

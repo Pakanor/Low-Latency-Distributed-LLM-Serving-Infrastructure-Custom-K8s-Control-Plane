@@ -30,4 +30,5 @@ def test_llm_engine_execution():
     res = engine.step()
 
     assert len(seq.output_token_ids) == 1
-    assert seq.output_token_ids[0] == 100
+    assert seq.output_token_ids[0] == 103
+    assert seq.block_table is not None

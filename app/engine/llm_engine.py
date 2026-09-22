@@ -58,12 +58,17 @@ class LLMEngine:
             seq_block_table = block_tables[row].tolist()
             ctx_len = int(context_lens[row].item())
 
-            next_token = self.model_client.generate_step_tensor(
+            result = self.model_client.generate_step_tensor(
                 input_ids=seq.prompt_token_ids,
                 block_table=seq_block_table,
                 context_len=ctx_len
             )
+            next_token = result["next_token_id"]
             seq.append_token(next_token)
+            key_tensor = result.get("key")
+            value_tensor = result.get("value")
+            if key_tensor is not None and value_tensor is not None:
+                self.kv_cache_manager.write_single_token_kv(seq, key_tensor, value_tensor)
 
         for i, seq in enumerate(decodes):
             row = len(prefills) + i
@@ -72,12 +77,17 @@ class LLMEngine:
 
             last_token = [seq.output_token_ids[-1]] if seq.output_token_ids else [seq.prompt_token_ids[-1]]
 
-            next_token = self.model_client.generate_step_tensor(
+            result = self.model_client.generate_step_tensor(
                 input_ids=last_token,
                 block_table=seq_block_table,
                 context_len=ctx_len
             )
+            next_token = result["next_token_id"]
             seq.append_token(next_token)
+            key_tensor = result.get("key")
+            value_tensor = result.get("value")
+            if key_tensor is not None and value_tensor is not None:
+                self.kv_cache_manager.write_single_token_kv(seq, key_tensor, value_tensor)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
         running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
