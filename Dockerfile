@@ -1,5 +1,5 @@
 # Stage 1: Build dependencies & native modules
-FROM python:3.11-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 COPY . .
 RUN pip install --no-cache-dir --no-build-isolation --user -e .
 
-FROM python:3.11-slim AS runner
+FROM python:3.13-slim AS runner
 
 WORKDIR /app
 
