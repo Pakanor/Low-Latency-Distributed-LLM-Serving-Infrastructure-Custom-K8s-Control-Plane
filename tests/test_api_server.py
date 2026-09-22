@@ -15,7 +15,7 @@ def test_async_sse_completion_endpoint():
         head_dim=8,
         device="cpu"
     )
-    scheduler = Scheduler(kv_cache_manager=manager, max_num_seqs=4)
+    scheduler = Scheduler(kv_cache_manager=manager, max_batch_size=4)
     client = MockModelClient()
     engine = LLMEngine(scheduler=scheduler, model_client=client, kv_cache_manager=manager)
 
