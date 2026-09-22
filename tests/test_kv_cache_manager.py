@@ -16,7 +16,7 @@ def kv_manager():
 
 
 def test_allocate_and_write_prefix(kv_manager):
-    seq = Sequence(seq_id=1, prompt_token_ids=[10, 20, 30, 40, 50])  # 5 tokenów -> 2 bloki
+    seq = Sequence(seq_id=1, prompt_token_ids=[10, 20, 30, 40, 50])
     kv_manager.allocate_prefix_blocks(seq)
 
     assert seq.block_table is not None
@@ -31,7 +31,7 @@ def test_allocate_and_write_prefix(kv_manager):
 
 
 def test_single_token_kv_write(kv_manager):
-    seq = Sequence(seq_id=2, prompt_token_ids=[10, 20, 30, 40])  # 4 tokeny -> 1 blok
+    seq = Sequence(seq_id=2, prompt_token_ids=[10, 20, 30, 40])
     kv_manager.allocate_prefix_blocks(seq)
 
     seq.append_token(50)

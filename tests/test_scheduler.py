@@ -21,7 +21,6 @@ def test_scheduler_prefill_and_decode_limits():
 
     assert scheduler.has_unfinished_sequences() is True
 
-    # 1. Krok: Prefill
     outputs = scheduler.schedule()
     assert len(outputs.scheduled_prefills) == 2
     assert len(outputs.scheduled_decodes) == 0

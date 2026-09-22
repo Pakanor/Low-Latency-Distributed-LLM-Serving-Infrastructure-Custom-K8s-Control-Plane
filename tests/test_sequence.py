@@ -13,7 +13,6 @@ def test_sequence_lifecycle():
     assert seq.total_len == 4
     assert seq.status == SequenceStatus.WAITING
 
-    # Dodanie 2. tokena wyjściowego (osiągnięcie max_tokens=2)
     seq.append_token(202)
     assert seq.total_len == 5
     assert seq.status == SequenceStatus.FINISHED

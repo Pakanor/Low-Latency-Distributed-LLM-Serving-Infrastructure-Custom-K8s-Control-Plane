@@ -23,7 +23,7 @@ def test_live_k8s_model_generation():
 
    
     client = K8sModelClient(
-        endpoint_url="http://localhost:8000/generate",
+        endpoint_url="http://localhost:8000/generate_step",
         model_name="HuggingFaceTB/SmolLM-135M-Instruct"
     )
 

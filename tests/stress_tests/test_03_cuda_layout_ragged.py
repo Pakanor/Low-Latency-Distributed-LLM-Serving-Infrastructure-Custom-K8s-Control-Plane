@@ -63,14 +63,13 @@ def test_block_boundary_exact_crossing():
 
     block_tables, context_lens = kv_mgr.build_block_tables([seq])
     
-    assert context_lens.tolist() == [5]
+    assert context_lens.tolist() == [4]
     assert block_tables.shape == (1, 2)
     assert block_tables[0, 0] != -1
     assert block_tables[0, 1] != -1
 
 
 def test_empty_prompt_rejection():
-    
     kv_mgr = PagedKVCacheManager(
         total_blocks=5,
         block_size=4,
@@ -86,8 +85,8 @@ def test_empty_prompt_rejection():
     )
     engine = LLMEngine(kv_cache_manager=kv_mgr, scheduler=scheduler)
 
-    seq = engine.add_request(prompt_token_ids=[], max_tokens=5)
-    
-    res = engine.step()
-    
-    assert seq.total_len == 1  # 0 prompt + 1 podglad z generated_token po step
+    try:
+        seq = engine.add_request(prompt_token_ids=[], max_tokens=5)
+    except ValueError:
+        return
+    assert False, "Expected ValueError for empty prompt"

@@ -67,7 +67,7 @@ def test_allocator_lifetime_with_garbage_collection():
     gc.collect()
 
     assert block_table_ref is not None
-    assert block_table_ref.get_num_blocks() > 0
+    assert len(block_table_ref.get_physical_blocks()) > 0
     
     block_table_ref.release()
 
