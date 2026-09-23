@@ -3,8 +3,8 @@ import sys
 import json
 import logging
 import asyncio
-from typing import AsyncGenerator, List, Optional, Dict
-
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import torch
@@ -16,37 +16,12 @@ from app.engine.llm_engine import LLMEngine
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LLM Inference Engine API")
-
 MODEL_NAME = os.getenv("MODEL_NAME", "HuggingFaceTB/SmolLM-135M-Instruct")
 
 model = None
 tokenizer = None
-kv_cache_store: dict = {}
-engine: Optional[LLMEngine] = None
+kv_cache_store: Dict[int, Any] = {}
 _step_task: Optional[asyncio.Task] = None
-
-
-class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
-    max_tokens: int = Field(default=50, ge=1, le=256)
-    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-
-
-class StepGenerateRequest(BaseModel):
-    seq_id: int
-    input_ids: List[int]
-
-
-class CompletionRequest(BaseModel):
-    prompt: str = Field(..., min_length=1)
-    max_tokens: int = Field(default=16, ge=1, le=2048)
-
-
-def set_engine(engine_instance: LLMEngine) -> None:
-    global engine
-    engine = engine_instance
 
 
 def load_model() -> bool:
@@ -67,27 +42,65 @@ def load_model() -> bool:
         return False
 
 
+@asynccontextmanager
+async def lifespan(app_):
+    global _step_task
+    if model is None:
+        if not load_model():
+            logger.error("Fatal: Could not load model on startup")
+            sys.exit(1)
+    if engine is not None:
+        engine.model = model
+    _step_task = asyncio.create_task(_step_loop())
+    yield
+    if _step_task is not None:
+        _step_task.cancel()
+        try:
+            await _step_task
+        except asyncio.CancelledError:
+            pass
+    kv_cache_store.clear()
+    logger.info("Server shutdown complete.")
+
+
+app = FastAPI(title="LLM Inference Engine API", lifespan=lifespan)
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    max_tokens: int = Field(default=50, ge=1, le=256)
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+
+
+class StepGenerateRequest(BaseModel):
+    seq_id: int
+    input_ids: List[int]
+
+
+class CompletionRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    max_tokens: int = Field(default=16, ge=1, le=2048)
+
+
+engine: Optional[LLMEngine] = None
+
+
+def set_engine(engine_instance: LLMEngine) -> None:
+    global engine
+    engine = engine_instance
+
+
 async def _step_loop():
     while True:
         if engine is not None and engine.has_unfinished_requests():
             try:
                 await asyncio.to_thread(engine.step)
-                if getattr(engine, "update_event", None) is not None:
-                    engine.update_event.set()
             except RuntimeError as e:
                 logger.warning(f"Scheduler OOM, skipping step: {e}")
             except Exception as e:
                 logger.error(f"Step loop execution error: {e}")
         await asyncio.sleep(0.005)
-
-
-@app.on_event("startup")
-async def startup():
-    global _step_task
-    if not load_model():
-        logger.error("Fatal: Could not load model on startup")
-        sys.exit(1)
-    _step_task = asyncio.create_task(_step_loop())
 
 
 @app.get("/health")
@@ -96,7 +109,7 @@ def health():
         "status": "ok" if model is not None else "error",
         "model": MODEL_NAME,
         "device": "cpu",
-        "engine_initialized": engine is not None
+        "engine_initialized": engine is not None,
     }
 
 
@@ -147,6 +160,9 @@ async def generate_step(req: StepGenerateRequest):
             next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
             kv_cache_store[req.seq_id] = outputs.past_key_values
 
+        if next_token_id == tokenizer.eos_token_id:
+            kv_cache_store.pop(req.seq_id, None)
+
         return {
             "seq_id": req.seq_id,
             "next_token_id": next_token_id,
@@ -169,7 +185,7 @@ async def create_completion(request: CompletionRequest):
         max_tokens=request.max_tokens,
     )
 
-    if not hasattr(engine, "update_event") or engine.update_event is None:
+    if engine.update_event is None:
         engine.update_event = asyncio.Event()
 
     async def token_generator() -> AsyncGenerator[str, None]:
@@ -192,10 +208,11 @@ async def create_completion(request: CompletionRequest):
                     payload = {
                         "text": tokenizer.decode([token_id], skip_special_tokens=True),
                         "token_id": token_id,
-                        "finished": is_finished
+                        "finished": is_finished,
                     }
                     yield json.dumps(payload)
 
+        kv_cache_store.pop(sequence.seq_id, None)
         yield json.dumps({"finished": True, "text": ""})
 
     return EventSourceResponse(token_generator())

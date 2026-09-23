@@ -1,7 +1,6 @@
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.scheduler import Scheduler
 from app.engine.llm_engine import LLMEngine
-from app.model.client import MockModelClient
 from app.api.server import set_engine, app
 import uvicorn
 
@@ -13,10 +12,10 @@ scheduler = Scheduler(
     block_size=4,
     allocator=manager.get_allocator(),
 )
+
 engine = LLMEngine(
     kv_cache_manager=manager,
     scheduler=scheduler,
-    model_client=MockModelClient(),
 )
 set_engine(engine)
 

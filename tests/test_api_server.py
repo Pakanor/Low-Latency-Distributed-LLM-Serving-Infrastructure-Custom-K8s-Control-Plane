@@ -8,6 +8,20 @@ from app.model.client import MockModelClient
 
 
 def test_async_sse_completion_endpoint():
+    import app.api.server as server_module
+
+    class _FakeTokenizer:
+        def encode(self, text, add_special_tokens=True):
+            return [ord(c) for c in text]
+        def decode(self, token_ids, skip_special_tokens=True):
+            return "".join(chr(t) for t in token_ids if 0 <= t < 128)
+        @property
+        def eos_token_id(self):
+            return 0
+
+    server_module.tokenizer = _FakeTokenizer()
+    server_module.model = object()
+
     manager = PagedKVCacheManager(
         total_blocks=16,
         block_size=4,
