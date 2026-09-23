@@ -20,12 +20,11 @@ def test_async_sse_completion_endpoint():
     engine = LLMEngine(scheduler=scheduler, model_client=client, kv_cache_manager=manager)
 
     set_engine(engine)
-    test_client = TestClient(app)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/completions",
+            json={"prompt": "Hi", "max_tokens": 3}
+        )
 
-    response = test_client.post(
-        "/v1/completions",
-        json={"prompt": "Hi", "max_tokens": 3}
-    )
-    
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers["content-type"]
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]

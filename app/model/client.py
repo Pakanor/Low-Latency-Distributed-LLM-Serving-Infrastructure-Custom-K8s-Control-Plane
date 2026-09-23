@@ -1,5 +1,6 @@
 import urllib.request
 import json
+import torch
 from typing import List, Optional
 
 
@@ -15,28 +16,18 @@ class K8sModelClient:
             from transformers import AutoTokenizer
 
             self.tokenizer = AutoTokenizer.from_pretrained(model_name or "HuggingFaceTB/SmolLM-135M-Instruct")
-        except Exception:
-            class _FallbackTokenizer:
-                def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
-                    return [ord(c) for c in text]
-
-                @property
-                def eos_token_id(self) -> int:
-                    return 0
-
-            self.tokenizer = _FallbackTokenizer()
+        except Exception as e:
+            raise ImportError(f"Failed to import tokenizer: {e}")
 
     def generate_step_tensor(
         self,
+        seq_id: int,
         input_ids: List[int],
-        block_table: List[int],
-        context_len: int
     ) -> dict:
-        
+
         payload = {
+            "seq_id": seq_id,
             "input_ids": input_ids,
-            "block_table": block_table,
-            "context_len": context_len
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -45,44 +36,39 @@ class K8sModelClient:
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        
+
         with urllib.request.urlopen(req, timeout=5) as response:
             result = json.loads(response.read().decode("utf-8"))
-            keys = None
-            values = None
-            key = None
-            value = None
-            if result.get("keys") and result.get("values"):
-                keys = torch.tensor(result["keys"])
-                values = torch.tensor(result["values"])
-            if result.get("key") and result.get("value"):
-                key = torch.tensor(result["key"])
-                value = torch.tensor(result["value"])
             return {
                 "next_token_id": result["next_token_id"],
-                "keys": keys,
-                "values": values,
-                "key": key,
-                "value": value,
+                "is_eos": result.get("is_eos", False),
             }
+
 
 class MockModelClient:
     def generate_step_tensor(
         self,
+        seq_id: int,
         input_ids: List[int],
-        block_table: List[int],
-        context_len: int
+        past_key_values: Optional[List] = None,
     ) -> dict:
-        import torch as _torch
         seq_len = len(input_ids)
-        keys = _torch.zeros(seq_len, 2, 8)
-        values = _torch.zeros(seq_len, 2, 8)
-        last_key = keys[-1:, :, :]
-        last_value = values[-1:, :, :]
+        num_layers = 16
+
+        if past_key_values is None:
+            past_kv = []
+            for _ in range(num_layers):
+                key = torch.zeros(1, 2, seq_len, 8)
+                value = torch.zeros(1, 2, seq_len, 8)
+                past_kv.append((key, value))
+        else:
+            past_kv = []
+            for layer in past_key_values:
+                key = torch.cat([layer[0], torch.zeros(1, 2, 1, 8)], dim=2)
+                value = torch.cat([layer[1], torch.zeros(1, 2, 1, 8)], dim=2)
+                past_kv.append((key, value))
+
         return {
             "next_token_id": 100 + seq_len,
-            "keys": keys,
-            "values": values,
-            "key": last_key.squeeze(0).squeeze(-2),
-            "value": last_value.squeeze(0).squeeze(-2),
+            "past_key_values": past_kv,
         }
