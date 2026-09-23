@@ -143,15 +143,22 @@ class PagedKVCacheManager:
             block_tables_cpu.to(self.device, non_blocking=True),
             context_lens_cpu.to(self.device, non_blocking=True)
         )
-    def swap_out_sequence(self, seq_id: int, block_table: List[int]) -> bool:
-        for block_id in block_table:
+    def swap_out_sequence(self, seq: Sequence) -> None:
+        assert seq.block_table is not None
+        physical_blocks = seq.block_table.get_physical_blocks()
+        for block_id in physical_blocks:
             self.allocator.swap_out(block_id)
-        self.swapped_seqs.add(seq_id)
-        return True
+        self.swapped_seqs.add(seq.seq_id)
+        seq.status = SequenceStatus.SWAPPED
 
-    def swap_in_sequence(self, seq_id: int, block_table: List[int]) -> bool:
-        for block_id in block_table:
-            self.allocator.swap_in(block_id)
-        if seq_id in self.swapped_seqs:
-            self.swapped_seqs.remove(seq_id)
-        return True
+    def swap_in_sequence(self, seq: Sequence) -> None:
+        assert seq.block_table is not None
+        old_physical_blocks = seq.block_table.get_physical_blocks()
+        new_physical_blocks = []
+        for block_id in old_physical_blocks:
+            new_block = self.allocator.swap_in(block_id)
+            new_physical_blocks.append(new_block)
+        for old_id, new_id in zip(old_physical_blocks, new_physical_blocks):
+            seq.block_table.replace_block(old_id, new_id)
+        self.swapped_seqs.discard(seq.seq_id)
+        seq.status = SequenceStatus.RUNNING

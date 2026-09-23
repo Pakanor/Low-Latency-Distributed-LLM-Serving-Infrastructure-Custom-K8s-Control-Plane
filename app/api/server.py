@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from typing import AsyncGenerator
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -7,9 +8,12 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.engine.llm_engine import LLMEngine
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="LLM Inference Engine API")
 
 engine: LLMEngine = None
+_step_task: asyncio.Task | None = None
 
 
 class CompletionRequest(BaseModel):
@@ -20,6 +24,22 @@ class CompletionRequest(BaseModel):
 def set_engine(engine_instance: LLMEngine) -> None:
     global engine
     engine = engine_instance
+
+
+async def _step_loop():
+    while True:
+        if engine is not None and engine.has_unfinished_requests():
+            try:
+                await asyncio.to_thread(engine.step)
+            except Exception as e:
+                logger.error(f"Step error: {e}")
+        await asyncio.sleep(0.01)
+
+
+@app.on_event("startup")
+async def startup():
+    global _step_task
+    _step_task = asyncio.create_task(_step_loop())
 
 
 @app.post("/v1/completions")
@@ -38,11 +58,6 @@ async def create_completion(request: CompletionRequest):
         last_yielded_count = 0
 
         while not sequence.is_finished():
-            try:
-                await asyncio.to_thread(engine.step)
-            except Exception as e:
-                yield json.dumps({"error": str(e), "finished": True, "text": ""})
-                return
             await asyncio.sleep(0.01)
 
             current_outputs = sequence.output_token_ids
