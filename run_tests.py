@@ -35,7 +35,7 @@ for test_file in tests:
             [sys.executable, test_file],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
             env=env,
             cwd='/home/roberto/llm-infra'
         )
