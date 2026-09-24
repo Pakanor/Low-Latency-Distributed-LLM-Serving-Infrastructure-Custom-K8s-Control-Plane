@@ -9,6 +9,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+
 class LLMEngine:
     def __init__(
         self,
@@ -46,14 +47,15 @@ class LLMEngine:
         self,
         seq_id: int,
         input_ids: List[int],
-    ) -> int:
+        is_prefill: bool = False,
+    ) -> Tuple[int, Optional[Tuple[torch.Tensor, ...]]]:
         if self.model is None or not callable(getattr(self.model, "forward", None)):
             assert self.model_client is not None
             result = self.model_client.generate_step_tensor(
                 seq_id=seq_id,
                 input_ids=input_ids,
             )
-            return result["next_token_id"]
+            return result["next_token_id"], None
 
         import torch as _torch
         with _torch.no_grad():
@@ -61,8 +63,34 @@ class LLMEngine:
             past_kv = self._past_key_values.get(seq_id, None)
             outputs = self.model(input_tensor, past_key_values=past_kv, use_cache=True)
             next_token_id = int(_torch.argmax(outputs.logits[0, -1, :]))
-            self._past_key_values[seq_id] = list(outputs.past_key_values)
-        return next_token_id
+            new_past_kv = list(outputs.past_key_values)
+            self._past_key_values[seq_id] = new_past_kv
+        return next_token_id, outputs.past_key_values
+
+    def _write_paged_kv_cache(
+        self,
+        seq: Sequence,
+        past_key_values: Tuple[torch.Tensor, ...],
+        is_prefill: bool = False,
+    ) -> None:
+        """Write model's KV cache to PagedKVCacheManager's contiguous tensors."""
+        if self.kv_cache_manager is None or seq.block_table is None:
+            return
+
+        num_layers = len(past_key_values)
+        for layer_idx in range(num_layers):
+            key = past_key_values[layer_idx][0] 
+            value = past_key_values[layer_idx][1]
+
+            key = key.squeeze(0).transpose(0, 1)
+            value = value.squeeze(0).transpose(0, 1)
+
+            if is_prefill:
+                self.kv_cache_manager.write_prefix_kv(seq, key, value)
+            else:
+                last_key = key[-1]  
+                last_value = value[-1]
+                self.kv_cache_manager.write_single_token_kv(seq, last_key, last_value)
 
     def step(self) -> Dict[str, List[Sequence]]:
         try:
@@ -80,13 +108,17 @@ class LLMEngine:
         all_active_seqs = prefills + decodes
 
         for seq in prefills:
-            next_token = self._local_generate_step(seq.seq_id, seq.prompt_token_ids)
+            next_token, past_kv = self._local_generate_step(seq.seq_id, seq.prompt_token_ids, is_prefill=True)
             seq.append_token(next_token)
+            if past_kv is not None:
+                self._write_paged_kv_cache(seq, past_kv, is_prefill=True)
 
         for seq in decodes:
             last_token = [seq.output_token_ids[-1]] if seq.output_token_ids else [seq.prompt_token_ids[-1]]
-            next_token = self._local_generate_step(seq.seq_id, last_token)
+            next_token, past_kv = self._local_generate_step(seq.seq_id, last_token, is_prefill=False)
             seq.append_token(next_token)
+            if past_kv is not None:
+                self._write_paged_kv_cache(seq, past_kv, is_prefill=False)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
         running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
