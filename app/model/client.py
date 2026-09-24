@@ -1,7 +1,7 @@
 import urllib.request
 import json
 import torch
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class K8sModelClient:
@@ -46,13 +46,18 @@ class K8sModelClient:
 
 
 class MockModelClient:
+    def __init__(self, eos_token_id: int = 0):
+        self.eos_token_id = eos_token_id
+        self._seq_len_cache: Dict[int, int] = {}
+
     def generate_step_tensor(
         self,
         seq_id: int,
         input_ids: List[int],
         past_key_values: Optional[List] = None,
     ) -> dict:
-        seq_len = len(input_ids)
+        seq_len = self._seq_len_cache.get(seq_id, 0) + len(input_ids)
+        self._seq_len_cache[seq_id] = seq_len
         num_layers = 16
 
         if past_key_values is None:
@@ -68,7 +73,11 @@ class MockModelClient:
                 value = torch.cat([layer[1], torch.zeros(1, 2, 1, 8)], dim=2)
                 past_kv.append((key, value))
 
+        next_token_id = 100 + seq_len
+        is_eos = next_token_id == self.eos_token_id
+
         return {
-            "next_token_id": 100 + seq_len,
+            "next_token_id": next_token_id,
+            "is_eos": is_eos,
             "past_key_values": past_kv,
         }
