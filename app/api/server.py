@@ -44,7 +44,7 @@ def load_model() -> bool:
 
 @asynccontextmanager
 async def lifespan(app_):
-    global _step_task
+    global model, tokenizer, _step_task
     if model is None:
         if not load_model():
             logger.error("Fatal: Could not load model on startup")
@@ -59,7 +59,15 @@ async def lifespan(app_):
             await _step_task
         except asyncio.CancelledError:
             pass
+    if model is not None:
+        del model
+        model = None
+    if tokenizer is not None:
+        del tokenizer
+        tokenizer = None
     kv_cache_store.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     logger.info("Server shutdown complete.")
 
 
