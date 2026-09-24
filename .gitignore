@@ -54,8 +54,7 @@ dist/
 .wheels/
 
 # --- Temporary Test Scripts ---
-test_alloc.py__pycache__/
-*.pyc
+test_alloc.py
 __pycache__/
 *.pyc
 
