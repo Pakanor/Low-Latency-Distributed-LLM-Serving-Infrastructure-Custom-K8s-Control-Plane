@@ -71,6 +71,54 @@ class PagedKVCacheManager:
             seq.block_table.release(self.allocator)
             seq.block_table = None
 
+    def build_slot_mapping(
+        self,
+        sequences: List[Sequence],
+        start_tokens: List[int],
+        token_counts: List[int],
+    ) -> torch.Tensor:
+        if not (len(sequences) == len(start_tokens) == len(token_counts)):
+            raise ValueError(
+                f"sequences ({len(sequences)}), start_tokens ({len(start_tokens)}) "
+                f"and token_counts ({len(token_counts)}) must have the same length"
+            )
+
+        if not sequences:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        chunks = [
+            self._sequence_slots(seq, start, count)
+            for seq, start, count in zip(sequences, start_tokens, token_counts)
+        ]
+        chunks = [chunk for chunk in chunks if chunk.numel() > 0]
+        if not chunks:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+        return torch.cat(chunks)
+
+    def scatter_kv(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if keys.shape != values.shape:
+            raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
+
+        expected_shape = (
+            slot_mapping.numel(),
+            self.num_layers,
+            self.num_heads,
+            self.head_dim,
+        )
+        if tuple(keys.shape) != expected_shape:
+            raise ValueError(f"Expected keys shape {expected_shape}, got {tuple(keys.shape)}")
+
+        if slot_mapping.numel() == 0:
+            return
+
+        self.key_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = keys
+        self.value_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = values
+
     def write_prefix_kv(
         self,
         seq: Sequence,
@@ -84,20 +132,8 @@ class PagedKVCacheManager:
         if seq_len == 0 or seq.block_table is None:
             return torch.empty((0,), dtype=torch.long, device=self.device)
 
-        physical_blocks = seq.block_table.get_physical_blocks()
-
-        block_offsets = torch.tensor(
-            physical_blocks, dtype=torch.long, device=self.device
-        ) * self.block_size
-        slot_offsets = torch.arange(
-            self.block_size, dtype=torch.long, device=self.device
-        )
-
-        all_slots = (block_offsets.unsqueeze(1) + slot_offsets.unsqueeze(0)).flatten()
-        slot_mapping = all_slots[:seq_len]
-
-        self.key_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = keys.transpose(0, 1)
-        self.value_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = values.transpose(0, 1)
+        slot_mapping = self.build_slot_mapping([seq], [0], [seq_len])
+        self.scatter_kv(keys.transpose(0, 1), values.transpose(0, 1), slot_mapping)
 
         return slot_mapping
 
@@ -109,14 +145,9 @@ class PagedKVCacheManager:
     ) -> None:
         assert seq.block_table is not None
         token_index = seq.block_table.get_tokens_count() - 1
-        physical_blocks = seq.block_table.get_physical_blocks()
 
-        block_idx = token_index // self.block_size
-        slot_idx = token_index % self.block_size
-        physical_block_id = physical_blocks[block_idx]
-
-        self.key_cache[physical_block_id, slot_idx] = key_token
-        self.value_cache[physical_block_id, slot_idx] = value_token
+        slot_mapping = self.build_slot_mapping([seq], [token_index], [1])
+        self.scatter_kv(key_token.unsqueeze(0), value_token.unsqueeze(0), slot_mapping)
 
     def gather_kv_cache(
         self,
@@ -187,6 +218,40 @@ class PagedKVCacheManager:
             block_tables_cpu.to(self.device, non_blocking=True),
             context_lens_cpu.to(self.device, non_blocking=True)
         )
+
+    def _sequence_slots(self, seq: Sequence, start_token: int, token_count: int) -> torch.Tensor:
+        if seq.block_table is None:
+            raise ValueError(f"Sequence {seq.seq_id} has no block table")
+        if start_token < 0 or token_count < 0:
+            raise ValueError(
+                f"Sequence {seq.seq_id}: start_token ({start_token}) and "
+                f"token_count ({token_count}) must be non-negative"
+            )
+
+        tokens_count = seq.block_table.get_tokens_count()
+        if start_token + token_count > tokens_count:
+            raise ValueError(
+                f"Sequence {seq.seq_id}: tokens [{start_token}, {start_token + token_count}) "
+                f"exceed allocated tokens ({tokens_count})"
+            )
+
+        if token_count == 0:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        first_block = start_token // self.block_size
+        last_block = (start_token + token_count - 1) // self.block_size
+        physical_blocks = seq.block_table.get_physical_blocks()[first_block:last_block + 1]
+
+        block_offsets = torch.tensor(
+            physical_blocks, dtype=torch.long, device=self.device
+        ) * self.block_size
+        slot_offsets = torch.arange(
+            self.block_size, dtype=torch.long, device=self.device
+        )
+        all_slots = (block_offsets.unsqueeze(1) + slot_offsets.unsqueeze(0)).flatten()
+
+        offset = start_token - (first_block * self.block_size)
+        return all_slots[offset:offset + token_count]
 
     def swap_out_sequence(self, seq: Sequence) -> None:
         assert seq.block_table is not None
