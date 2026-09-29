@@ -68,11 +68,11 @@ def test_scatter_kv_writes_flat_ragged_batch(kv_manager):
     first_blocks = first.block_table.get_physical_blocks()
     second_blocks = second.block_table.get_physical_blocks()
     for token in range(3):
-        assert torch.equal(kv_manager.key_cache[first_blocks[0], token], keys[token])
-        assert torch.equal(kv_manager.value_cache[first_blocks[0], token], values[token])
+        assert torch.equal(kv_manager.key_cache[0, first_blocks[0], token], keys[token, 0])
+        assert torch.equal(kv_manager.value_cache[0, first_blocks[0], token], values[token, 0])
     for token in range(2):
-        assert torch.equal(kv_manager.key_cache[second_blocks[0], token], keys[3 + token])
-        assert torch.equal(kv_manager.value_cache[second_blocks[0], token], values[3 + token])
+        assert torch.equal(kv_manager.key_cache[0, second_blocks[0], token], keys[3 + token, 0])
+        assert torch.equal(kv_manager.value_cache[0, second_blocks[0], token], values[3 + token, 0])
 
 
 def test_scatter_kv_does_not_touch_other_sequences(kv_manager):
@@ -90,7 +90,7 @@ def test_scatter_kv_does_not_touch_other_sequences(kv_manager):
 
     second_blocks = second.block_table.get_physical_blocks()
     for token in range(4):
-        assert torch.equal(kv_manager.key_cache[second_blocks[0], token], second_keys[token])
+        assert torch.equal(kv_manager.key_cache[0, second_blocks[0], token], second_keys[token, 0])
 
 
 def test_scatter_kv_rejects_wrong_token_shape(kv_manager):
@@ -113,3 +113,7 @@ def test_build_slot_mapping_rejects_mismatched_lengths(kv_manager):
 
     with pytest.raises(ValueError):
         kv_manager.build_slot_mapping([seq], [0, 1], [4])
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))

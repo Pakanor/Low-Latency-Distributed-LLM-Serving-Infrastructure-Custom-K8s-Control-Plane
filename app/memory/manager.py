@@ -127,23 +127,45 @@ class PagedKVCacheManager:
         values: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        if keys.shape != values.shape:
-            raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
-
-        expected_shape = (
-            slot_mapping.numel(),
-            self.num_layers,
-            self.num_heads,
-            self.head_dim,
+        self._validate_token_tensors(
+            keys,
+            values,
+            (slot_mapping.numel(), self.num_layers, self.num_heads, self.head_dim),
         )
-        if tuple(keys.shape) != expected_shape:
-            raise ValueError(f"Expected keys shape {expected_shape}, got {tuple(keys.shape)}")
+
+        for layer_idx in range(self.num_layers):
+            self.scatter_layer_kv(
+                layer_idx,
+                keys[:, layer_idx],
+                values[:, layer_idx],
+                slot_mapping,
+            )
+
+    def scatter_layer_kv(
+        self,
+        layer_idx: int,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        self._validate_layer_idx(layer_idx)
+        self._validate_token_tensors(
+            keys,
+            values,
+            (slot_mapping.numel(), self.num_heads, self.head_dim),
+        )
 
         if slot_mapping.numel() == 0:
             return
 
-        self.key_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = keys
-        self.value_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = values
+        self.key_cache[layer_idx].view(-1, self.num_heads, self.head_dim)[slot_mapping] = keys
+        self.value_cache[layer_idx].view(-1, self.num_heads, self.head_dim)[slot_mapping] = values
+
+    def gather_layer_keys(self, layer_idx: int, slot_indices: torch.Tensor) -> torch.Tensor:
+        return self._gather_layer(self.key_cache, layer_idx, slot_indices)
+
+    def gather_layer_values(self, layer_idx: int, slot_indices: torch.Tensor) -> torch.Tensor:
+        return self._gather_layer(self.value_cache, layer_idx, slot_indices)
 
     def write_prefix_kv(
         self,
@@ -192,19 +214,15 @@ class PagedKVCacheManager:
         if read_len <= 0:
             return None
 
-        block_data = torch.stack([self.key_cache[bid] for bid in physical_blocks])
-        block_data_v = torch.stack([self.value_cache[bid] for bid in physical_blocks])
-
-        flat_k = block_data.view(-1, self.num_layers, self.num_heads, self.head_dim)[:read_len]
-        flat_v = block_data_v.view(-1, self.num_layers, self.num_heads, self.head_dim)[:read_len]
-
         result = []
         for layer_idx in range(self.num_layers):
-            key = flat_k[:, layer_idx, :, :]
-            value = flat_v[:, layer_idx, :, :]
-            key = key.unsqueeze(0).transpose(1, 2)
-            value = value.unsqueeze(0).transpose(1, 2)
-            result.append((key, value))
+            key = self.key_cache[layer_idx]
+            value = self.value_cache[layer_idx]
+            block_data = torch.stack([key[bid] for bid in physical_blocks])
+            block_data_v = torch.stack([value[bid] for bid in physical_blocks])
+            flat_k = block_data.view(-1, self.num_heads, self.head_dim)[:read_len]
+            flat_v = block_data_v.view(-1, self.num_heads, self.head_dim)[:read_len]
+            result.append((flat_k.unsqueeze(0).transpose(1, 2), flat_v.unsqueeze(0).transpose(1, 2)))
 
         return tuple(result)
 
@@ -243,6 +261,34 @@ class PagedKVCacheManager:
         return (
             block_tables_cpu.to(self.device, non_blocking=True),
             context_lens_cpu.to(self.device, non_blocking=True)
+        )
+
+    def _validate_layer_idx(self, layer_idx: int) -> None:
+        if layer_idx < 0 or layer_idx >= self.num_layers:
+            raise ValueError(
+                f"Layer index {layer_idx} out of range (num_layers={self.num_layers})"
+            )
+
+    def _validate_token_tensors(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        expected_shape: Tuple[int, ...],
+    ) -> None:
+        if keys.shape != values.shape:
+            raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
+        if tuple(keys.shape) != expected_shape:
+            raise ValueError(f"Expected keys shape {expected_shape}, got {tuple(keys.shape)}")
+
+    def _gather_layer(
+        self,
+        cache: torch.Tensor,
+        layer_idx: int,
+        slot_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        self._validate_layer_idx(layer_idx)
+        return cache[layer_idx].view(-1, self.num_heads, self.head_dim).index_select(
+            0, slot_indices
         )
 
     def _sequence_slots(self, seq: Sequence, start_token: int, token_count: int) -> torch.Tensor:

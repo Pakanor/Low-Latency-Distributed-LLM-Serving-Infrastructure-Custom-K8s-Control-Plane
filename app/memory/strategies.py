@@ -51,7 +51,7 @@ class CpuKVCacheStrategy(KVCacheMemoryStrategy):
         return self._device
 
     def allocate_cache(self, total_blocks, block_size, num_layers, num_heads, head_dim, dtype):
-        shape = (total_blocks, block_size, num_layers, num_heads, head_dim)
+        shape = (num_layers, total_blocks, block_size, num_heads, head_dim)
         key_cache = torch.empty(shape, dtype=dtype)
         value_cache = torch.empty(shape, dtype=dtype)
         return key_cache, value_cache
@@ -79,7 +79,7 @@ class CudaKVCacheStrategy(KVCacheMemoryStrategy):
         return self._device
 
     def allocate_cache(self, total_blocks, block_size, num_layers, num_heads, head_dim, dtype):
-        shape = (total_blocks, block_size, num_layers, num_heads, head_dim)
+        shape = (num_layers, total_blocks, block_size, num_heads, head_dim)
         with torch.cuda._device_ctx(self._device.index):
             key_cache = torch.empty(shape, dtype=dtype, device=self._device)
             value_cache = torch.empty(shape, dtype=dtype, device=self._device)
@@ -110,7 +110,7 @@ class HipZeroCopyStrategy(KVCacheMemoryStrategy):
         return self._device
 
     def allocate_cache(self, total_blocks, block_size, num_layers, num_heads, head_dim, dtype):
-        shape = (total_blocks, block_size, num_layers, num_heads, head_dim)
+        shape = (num_layers, total_blocks, block_size, num_heads, head_dim)
         key_cache = torch.empty(shape, dtype=dtype).pin_memory()
         value_cache = torch.empty(shape, dtype=dtype).pin_memory()
         return key_cache, value_cache

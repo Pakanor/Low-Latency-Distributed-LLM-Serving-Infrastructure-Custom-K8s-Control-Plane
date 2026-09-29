@@ -25,8 +25,8 @@ def test_from_model_config_sizes_cache_with_kv_heads():
     assert manager.num_layers == 30
     assert manager.num_heads == 3
     assert manager.head_dim == 64
-    assert manager.key_cache.shape == (8, 4, 30, 3, 64)
-    assert manager.value_cache.shape == (8, 4, 30, 3, 64)
+    assert manager.key_cache.shape == (30, 8, 4, 3, 64)
+    assert manager.value_cache.shape == (30, 8, 4, 3, 64)
 
 
 def test_from_model_config_uses_explicit_head_dim():
@@ -37,7 +37,7 @@ def test_from_model_config_uses_explicit_head_dim():
     )
 
     assert manager.head_dim == 128
-    assert manager.key_cache.shape == (8, 4, 30, 3, 128)
+    assert manager.key_cache.shape == (30, 8, 4, 3, 128)
 
 
 def test_from_model_config_falls_back_to_attention_heads():
@@ -53,3 +53,7 @@ def test_from_model_config_falls_back_to_attention_heads():
     )
 
     assert manager.num_heads == 9
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
