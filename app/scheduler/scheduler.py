@@ -77,14 +77,19 @@ class Scheduler:
                 active_running.append(seq)
                 continue
 
-            needs_new_block = seq.total_len > 0 and seq.total_len % self.block_size == 0
+            if seq.block_table is not None:
+                current_tokens = seq.block_table.get_tokens_count()
+                needs_new_block = current_tokens > 0 and current_tokens % self.block_size == 0
+            else:
+                needs_new_block = False
+
             if needs_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self._free_blocks(seq)
                 self.waiting.insert(0, seq)
                 continue
 
-            if needs_new_block and self.kv_cache_manager is not None:
+            if self.kv_cache_manager is not None and seq.block_table is not None:
                 self.kv_cache_manager.allocate_slot_for_next_token(seq)
 
             active_running.append(seq)
