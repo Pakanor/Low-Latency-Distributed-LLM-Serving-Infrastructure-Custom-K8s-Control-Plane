@@ -62,3 +62,5 @@ __pycache__/
 ANALYSIS_CONTEXT.md
 *_ANALYSIS.md
 *_CONTEXT.md
+__pycache__/
+*.pyc
