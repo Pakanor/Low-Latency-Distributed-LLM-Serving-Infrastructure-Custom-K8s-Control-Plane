@@ -1,37 +1,38 @@
-from app.memory.manager import PagedKVCacheManager
-from app.memory.strategies import detect_strategy
-from app.scheduler.scheduler import Scheduler
-from app.engine.llm_engine import LLMEngine
-from app.api.server import set_engine, app, load_model
 import uvicorn
 
-manager = PagedKVCacheManager(
-    total_blocks=10,
-    block_size=4,
-    num_heads=8,
-    head_dim=64,
-    num_layers=16,
+from app.api import server
+from app.engine.llm_engine import LLMEngine
+from app.memory.manager import PagedKVCacheManager
+from app.scheduler.scheduler import Scheduler
+
+TOTAL_BLOCKS = 10
+BLOCK_SIZE = 4
+
+if not server.load_model():
+    raise SystemExit(f"Fatal: could not load model {server.MODEL_NAME}")
+
+manager = PagedKVCacheManager.from_model_config(
+    server.model.config,
+    total_blocks=TOTAL_BLOCKS,
+    block_size=BLOCK_SIZE,
 )
 scheduler = Scheduler(
     kv_cache_manager=manager,
     max_batch_size=2,
     max_num_batched_tokens=32,
-    block_size=4,
+    block_size=BLOCK_SIZE,
     allocator=manager.get_allocator(),
 )
-
-load_model()
-
-from app.api.server import model
 engine = LLMEngine(
     kv_cache_manager=manager,
     scheduler=scheduler,
-    model=model,
+    model=server.model,
 )
-set_engine(engine)
+server.set_engine(engine)
 
 print(f"KV cache strategy: {type(manager.strategy).__name__}")
 print(f"KV cache device: {manager.device}")
+print(f"KV cache geometry: {manager.num_layers} layers, {manager.num_heads} kv heads, {manager.head_dim} head dim")
 print(f"KV cache swap pool zero-copy: {manager.get_allocator().is_zero_copy()}")
 
-uvicorn.run(app, host="0.0.0.0", port=8000)
+uvicorn.run(app=server.app, host="0.0.0.0", port=8000)

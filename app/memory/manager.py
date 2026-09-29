@@ -10,6 +10,32 @@ from app.memory.strategies import (
 
 
 class PagedKVCacheManager:
+    @classmethod
+    def from_model_config(
+        cls,
+        config,
+        total_blocks: int,
+        block_size: int,
+        total_cpu_blocks: int = 32,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[Union[str, torch.device]] = None,
+        strategy: Optional[KVCacheMemoryStrategy] = None,
+    ) -> "PagedKVCacheManager":
+        num_attention_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", num_attention_heads)
+        head_dim = getattr(config, "head_dim", config.hidden_size // num_attention_heads)
+        return cls(
+            total_blocks=total_blocks,
+            block_size=block_size,
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            total_cpu_blocks=total_cpu_blocks,
+            dtype=dtype,
+            num_layers=config.num_hidden_layers,
+            device=device,
+            strategy=strategy,
+        )
+
     def __init__(
         self,
         total_blocks: int,
