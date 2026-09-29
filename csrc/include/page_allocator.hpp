@@ -13,7 +13,107 @@
 #include <mutex>
 #include <string>
 
+#ifndef LLM_INFRA_HIP_ENABLED
+#define LLM_INFRA_HIP_ENABLED 0
+#endif
+
+#if LLM_INFRA_HIP_ENABLED
+#include <hip/hip_runtime_api.h>
+#endif
+
 namespace llm_infra {
+
+class MappedHostBuffer {
+public:
+    MappedHostBuffer() = default;
+
+    ~MappedHostBuffer() { release(); }
+
+    MappedHostBuffer(const MappedHostBuffer&) = delete;
+    MappedHostBuffer& operator=(const MappedHostBuffer&) = delete;
+    MappedHostBuffer(MappedHostBuffer&&) = delete;
+    MappedHostBuffer& operator=(MappedHostBuffer&&) = delete;
+
+    void allocate(size_t size) {
+        if (size == 0) {
+            throw std::invalid_argument("MappedHostBuffer size must be greater than 0");
+        }
+        if (ptr_ != nullptr) {
+            release();
+        }
+        size_ = size;
+        if (!allocate_mapped(&ptr_)) {
+            allocate_aligned(&ptr_);
+        }
+    }
+
+    void* host_ptr() const { return ptr_; }
+    uintptr_t device_ptr() const { return device_ptr_; }
+    size_t size() const { return size_; }
+    bool is_mapped() const { return mapped_; }
+
+private:
+    bool allocate_mapped(void** out) {
+#if LLM_INFRA_HIP_ENABLED
+        if (hipError_t err = hipHostMalloc(out, size_, hipHostMallocMapped); err != hipSuccess) {
+            std::cerr << "[llm_infra] hipHostMalloc(" << size_ << " bytes) failed: "
+                      << hipGetErrorString(err) << " - falling back to page-aligned host memory" << std::endl;
+            *out = nullptr;
+            return false;
+        }
+        void* device_view = nullptr;
+        if (hipError_t err = hipHostGetDevicePointer(&device_view, *out, 0); err != hipSuccess || device_view == nullptr) {
+            std::cerr << "[llm_infra] hipHostGetDevicePointer failed: " << hipGetErrorString(err)
+                      << " - falling back to page-aligned host memory" << std::endl;
+            hipFreeHost(*out);
+            *out = nullptr;
+            return false;
+        }
+        device_ptr_ = reinterpret_cast<uintptr_t>(device_view);
+        mapped_ = true;
+        return true;
+#else
+        (void)out;
+        return false;
+#endif
+    }
+
+    void allocate_aligned(void** out) {
+        int ret = posix_memalign(out, kHostAlignment, size_);
+        if (ret != 0 || *out == nullptr) {
+            *out = nullptr;
+            throw std::bad_alloc();
+        }
+        device_ptr_ = 0;
+        mapped_ = false;
+    }
+
+    void release() {
+        if (ptr_ == nullptr) {
+            return;
+        }
+        bool released = false;
+#if LLM_INFRA_HIP_ENABLED
+        if (mapped_) {
+            released = hipFreeHost(ptr_) == hipSuccess;
+        }
+#endif
+        if (!released) {
+            free(ptr_);
+        }
+        ptr_ = nullptr;
+        device_ptr_ = 0;
+        mapped_ = false;
+        size_ = 0;
+    }
+
+    static constexpr size_t kHostAlignment = 4096;
+
+    void* ptr_{nullptr};
+    uintptr_t device_ptr_{0};
+    size_t size_{0};
+    bool mapped_{false};
+};
 
 struct Block {
     int id;
@@ -28,14 +128,10 @@ public:
             throw std::invalid_argument("block_size must be greater than 0");
         }
 
-        
         size_t total_ram_bytes = total_cpu_blocks_ * block_size_;
-        int ret = posix_memalign(&base_host_ptr_, 4096, total_ram_bytes);
-        if (ret != 0 || !base_host_ptr_) {
-            throw std::bad_alloc();
-        }
+        host_pool_.allocate(total_ram_bytes);
 
-        uint8_t* byte_ptr = static_cast<uint8_t*>(base_host_ptr_);
+        uint8_t* byte_ptr = static_cast<uint8_t*>(host_pool_.host_ptr());
 
         for (size_t i = 0; i < total_blocks_; ++i) {
             free_blocks_.push(static_cast<int>(i));
@@ -49,11 +145,7 @@ public:
         }
     }
 
-    ~PageAllocator() {
-        if (base_host_ptr_) {
-            free(base_host_ptr_);
-        }
-    }
+    ~PageAllocator() = default;
 
     PageAllocator(const PageAllocator&) = delete;
     PageAllocator& operator=(const PageAllocator&) = delete;
@@ -196,6 +288,23 @@ public:
         return reinterpret_cast<uintptr_t>(cpu_block_ptrs_[it->second]);
     }
 
+    uintptr_t get_device_ptr(int gpu_block_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        if (!host_pool_.is_mapped()) {
+            return 0;
+        }
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it == gpu_to_cpu_map_.end()) {
+            return 0;
+        }
+        size_t byte_offset = static_cast<size_t>(
+            static_cast<uint8_t*>(cpu_block_ptrs_[it->second]) - host_base());
+        return host_pool_.device_ptr() + byte_offset;
+    }
+
+    bool is_zero_copy() const { return host_pool_.is_mapped(); }
+
     size_t get_block_size() const { return block_size_; }
 
     size_t get_num_free_blocks() const {
@@ -223,11 +332,13 @@ private:
         }
     }
 
+    uint8_t* host_base() const { return static_cast<uint8_t*>(host_pool_.host_ptr()); }
+
     size_t total_blocks_;
     size_t block_size_;
     size_t total_cpu_blocks_;
-    
-    void* base_host_ptr_{nullptr};
+
+    MappedHostBuffer host_pool_;
     std::vector<void*> cpu_block_ptrs_;
 
     std::vector<Block> blocks_;
