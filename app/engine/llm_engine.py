@@ -1,11 +1,11 @@
 import logging
 import asyncio
+import torch
 from typing import List, Dict, Optional, Tuple
 from app.scheduler.sequence import Sequence, SequenceStatus
 from app.scheduler.scheduler import Scheduler
 from app.memory.manager import PagedKVCacheManager
 from app.model.client import K8sModelClient
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,6 @@ class LLMEngine:
         self.model = model
         self.seq_counter = 0
         self.update_event: Optional[asyncio.Event] = None
-        self._past_key_values: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
 
     def add_request(
         self,
@@ -48,23 +47,30 @@ class LLMEngine:
         seq_id: int,
         input_ids: List[int],
         is_prefill: bool = False,
+        seq: Optional[Sequence] = None,
     ) -> Tuple[int, Optional[Tuple[torch.Tensor, ...]]]:
+        past_kv = None
+        if not is_prefill and seq is not None and self.kv_cache_manager is not None:
+            read_len = seq.block_table.get_tokens_count() - 1
+            past_kv = self.kv_cache_manager.gather_kv_cache(seq, read_len=read_len)
+
         if self.model is None or not callable(getattr(self.model, "forward", None)):
             assert self.model_client is not None
             result = self.model_client.generate_step_tensor(
                 seq_id=seq_id,
                 input_ids=input_ids,
+                past_key_values=past_kv,
             )
-            return result["next_token_id"], None
+            new_past_kv = result.get("past_key_values")
+            if seq is not None and new_past_kv is not None and self.kv_cache_manager is not None:
+                self._write_paged_kv_cache(seq, new_past_kv, is_prefill=is_prefill)
+            return result["next_token_id"], new_past_kv
 
-        import torch as _torch
-        with _torch.no_grad():
-            input_tensor = _torch.tensor(input_ids, dtype=_torch.long).unsqueeze(0)
-            past_kv = self._past_key_values.get(seq_id, None)
+        with torch.no_grad():
+            input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
             outputs = self.model(input_tensor, past_key_values=past_kv, use_cache=True)
-            next_token_id = int(_torch.argmax(outputs.logits[0, -1, :]))
-            new_past_kv = list(outputs.past_key_values)
-            self._past_key_values[seq_id] = new_past_kv
+            next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
+            self._write_paged_kv_cache(seq, outputs.past_key_values, is_prefill=is_prefill)
         return next_token_id, outputs.past_key_values
 
     def _write_paged_kv_cache(
@@ -78,19 +84,26 @@ class LLMEngine:
             return
 
         num_layers = len(past_key_values)
-        for layer_idx in range(num_layers):
-            key = past_key_values[layer_idx][0] 
-            value = past_key_values[layer_idx][1]
+        keys_list = []
+        values_list = []
 
+        for layer_idx in range(num_layers):
+            key = past_key_values[layer_idx][0]
+            value = past_key_values[layer_idx][1]
             key = key.squeeze(0).transpose(0, 1)
             value = value.squeeze(0).transpose(0, 1)
+            keys_list.append(key)
+            values_list.append(value)
 
-            if is_prefill:
-                self.kv_cache_manager.write_prefix_kv(seq, key, value)
-            else:
-                last_key = key[-1]  
-                last_value = value[-1]
-                self.kv_cache_manager.write_single_token_kv(seq, last_key, last_value)
+        keys = torch.stack(keys_list)
+        values = torch.stack(values_list)
+
+        if is_prefill:
+            self.kv_cache_manager.write_prefix_kv(seq, keys, values)
+        else:
+            last_keys = keys[:, -1]
+            last_values = values[:, -1]
+            self.kv_cache_manager.write_single_token_kv(seq, last_keys, last_values)
 
     def step(self) -> Dict[str, List[Sequence]]:
         try:
@@ -108,23 +121,23 @@ class LLMEngine:
         all_active_seqs = prefills + decodes
 
         for seq in prefills:
-            next_token, past_kv = self._local_generate_step(seq.seq_id, seq.prompt_token_ids, is_prefill=True)
+            next_token, _ = self._local_generate_step(
+                seq.seq_id, seq.prompt_token_ids, is_prefill=True, seq=seq
+            )
             seq.append_token(next_token)
-            if past_kv is not None:
-                self._write_paged_kv_cache(seq, past_kv, is_prefill=True)
 
         for seq in decodes:
             last_token = [seq.output_token_ids[-1]] if seq.output_token_ids else [seq.prompt_token_ids[-1]]
-            next_token, past_kv = self._local_generate_step(seq.seq_id, last_token, is_prefill=False)
+            next_token, _ = self._local_generate_step(
+                seq.seq_id, last_token, is_prefill=False, seq=seq
+            )
             seq.append_token(next_token)
-            if past_kv is not None:
-                self._write_paged_kv_cache(seq, past_kv, is_prefill=False)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
         running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
 
         for seq in finished:
-            self._past_key_values.pop(seq.seq_id, None)
+            self.scheduler.free_sequence(seq)
 
         if self.update_event is not None:
             self.update_event.set()

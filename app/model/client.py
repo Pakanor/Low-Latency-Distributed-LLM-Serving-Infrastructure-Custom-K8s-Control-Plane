@@ -1,7 +1,7 @@
 import urllib.request
 import json
 import torch
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 
 class K8sModelClient:
@@ -23,6 +23,7 @@ class K8sModelClient:
         self,
         seq_id: int,
         input_ids: List[int],
+        past_key_values: Optional[Tuple] = None,
     ) -> dict:
 
         payload = {
@@ -46,31 +47,34 @@ class K8sModelClient:
 
 
 class MockModelClient:
-    def __init__(self, eos_token_id: int = 0):
+    def __init__(self, eos_token_id: int = 0, num_layers: int = 16,
+                 num_heads: int = 2, head_dim: int = 8):
         self.eos_token_id = eos_token_id
         self._seq_len_cache: Dict[int, int] = {}
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.head_dim = head_dim
 
     def generate_step_tensor(
         self,
         seq_id: int,
         input_ids: List[int],
-        past_key_values: Optional[List] = None,
+        past_key_values: Optional[Tuple] = None,
     ) -> dict:
         seq_len = self._seq_len_cache.get(seq_id, 0) + len(input_ids)
         self._seq_len_cache[seq_id] = seq_len
-        num_layers = 16
 
         if past_key_values is None:
             past_kv = []
-            for _ in range(num_layers):
-                key = torch.zeros(1, 2, seq_len, 8)
-                value = torch.zeros(1, 2, seq_len, 8)
+            for _ in range(self.num_layers):
+                key = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
+                value = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
                 past_kv.append((key, value))
         else:
             past_kv = []
             for layer in past_key_values:
-                key = torch.cat([layer[0], torch.zeros(1, 2, 1, 8)], dim=2)
-                value = torch.cat([layer[1], torch.zeros(1, 2, 1, 8)], dim=2)
+                key = torch.cat([layer[0], torch.zeros(1, self.num_heads, 1, self.head_dim)], dim=2)
+                value = torch.cat([layer[1], torch.zeros(1, self.num_heads, 1, self.head_dim)], dim=2)
                 past_kv.append((key, value))
 
         next_token_id = 100 + seq_len
