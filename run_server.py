@@ -15,6 +15,8 @@ manager = PagedKVCacheManager.from_model_config(
     server.model.config,
     total_blocks=TOTAL_BLOCKS,
     block_size=BLOCK_SIZE,
+    dtype=server.model.dtype,
+    device=server.model_device,
 )
 scheduler = Scheduler(
     kv_cache_manager=manager,

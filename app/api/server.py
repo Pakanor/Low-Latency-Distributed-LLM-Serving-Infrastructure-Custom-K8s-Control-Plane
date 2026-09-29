@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from sse_starlette.sse import EventSourceResponse
 
 from app.engine.llm_engine import LLMEngine
+from app.memory.strategies import resolve_device, resolve_dtype
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,21 +21,26 @@ MODEL_NAME = os.getenv("MODEL_NAME", "HuggingFaceTB/SmolLM-135M-Instruct")
 
 model = None
 tokenizer = None
+model_device: torch.device = torch.device("cpu")
 kv_cache_store: Dict[int, Any] = {}
 _step_task: Optional[asyncio.Task] = None
 
 
 def load_model() -> bool:
-    global model, tokenizer
+    global model, tokenizer, model_device
     try:
-        logger.info(f"Loading model: {MODEL_NAME}...")
+        device = resolve_device()
+        dtype = resolve_dtype()
+        logger.info(f"Loading model: {MODEL_NAME} on {device} ({dtype})...")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch.float32,
-            device_map="cpu",
+            dtype=dtype,
             trust_remote_code=True,
         )
+        model = model.to(device)
+        model.eval()
+        model_device = device
         logger.info("Model loaded successfully!")
         return True
     except Exception as e:
@@ -116,7 +122,7 @@ def health():
     return {
         "status": "ok" if model is not None else "error",
         "model": MODEL_NAME,
-        "device": "cpu",
+        "device": str(model_device),
         "engine_initialized": engine is not None,
     }
 
@@ -128,7 +134,7 @@ async def generate(req: GenerateRequest):
 
     try:
         with torch.no_grad():
-            inputs = tokenizer(req.prompt, return_tensors="pt")
+            inputs = tokenizer(req.prompt, return_tensors="pt").to(model_device)
 
             if inputs.input_ids.shape[1] > 2000:
                 raise HTTPException(status_code=400, detail="Prompt too long")
@@ -162,7 +168,7 @@ async def generate_step(req: StepGenerateRequest):
 
     try:
         with torch.no_grad():
-            input_tensor = torch.tensor([req.input_ids], dtype=torch.long)
+            input_tensor = torch.tensor([req.input_ids], dtype=torch.long, device=model_device)
             past_kv = kv_cache_store.get(req.seq_id, None)
             outputs = model(input_tensor, past_key_values=past_kv, use_cache=True)
             next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))

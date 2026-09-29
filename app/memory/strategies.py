@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, Union
+import os
+from typing import Optional, Tuple, Union
 import torch
 
 
@@ -128,6 +129,39 @@ class HipZeroCopyStrategy(KVCacheMemoryStrategy):
 
 def _is_rocm() -> bool:
     return getattr(torch.version, "hip", None) is not None
+
+
+def resolve_device(preferred: Optional[str] = None) -> torch.device:
+    requested = preferred or os.getenv("LLM_DEVICE")
+    if requested:
+        return torch.device(requested)
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
+def resolve_dtype(name: Optional[str] = None) -> torch.dtype:
+    requested = (name or os.getenv("LLM_DTYPE") or "auto").lower()
+    if requested == "auto":
+        if not torch.cuda.is_available():
+            return torch.float32
+        return torch.bfloat16 if _is_rocm() else torch.float16
+
+    aliases = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float": torch.float32,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+    }
+    if requested not in aliases:
+        raise ValueError(
+            f"Unsupported dtype '{requested}'. Use one of: {sorted(aliases)} or 'auto'."
+        )
+    return aliases[requested]
 
 
 def strategy_from_device(device: Union[str, torch.device]) -> KVCacheMemoryStrategy:
