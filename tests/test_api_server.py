@@ -27,7 +27,8 @@ def test_async_sse_completion_endpoint():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=16,
     )
     scheduler = Scheduler(kv_cache_manager=manager, max_batch_size=4)
     client = MockModelClient()

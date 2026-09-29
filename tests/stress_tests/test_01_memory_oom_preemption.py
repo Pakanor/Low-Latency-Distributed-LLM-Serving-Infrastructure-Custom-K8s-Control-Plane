@@ -3,6 +3,7 @@ import torch
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.scheduler import Scheduler
 from app.engine.llm_engine import LLMEngine
+from app.model.client import MockModelClient
 from app.scheduler.sequence import SequenceStatus
 
 
@@ -14,15 +15,16 @@ def constrained_engine():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=1,
     )
     scheduler = Scheduler(
+        kv_cache_manager=kv_mgr,
         max_batch_size=4,
         max_num_batched_tokens=32,
         block_size=4,
-        allocator=kv_mgr.get_allocator()
     )
-    return LLMEngine(kv_cache_manager=kv_mgr, scheduler=scheduler)
+    return LLMEngine(kv_cache_manager=kv_mgr, scheduler=scheduler, model_client=MockModelClient(num_layers=1))
 
 
 def test_prompt_exceeds_total_memory(constrained_engine):

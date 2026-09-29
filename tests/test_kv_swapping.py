@@ -10,7 +10,8 @@ def test_kv_cache_swapping_lifecycle():
         num_heads=2,
         head_dim=8,
         total_cpu_blocks=8,
-        device="cpu"
+        device="cpu",
+        num_layers=1,
     )
     allocator = manager.get_allocator()
 

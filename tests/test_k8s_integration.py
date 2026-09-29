@@ -11,7 +11,8 @@ def test_mock_model_generation():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=16,
     )
     scheduler = Scheduler(
         max_batch_size=2,

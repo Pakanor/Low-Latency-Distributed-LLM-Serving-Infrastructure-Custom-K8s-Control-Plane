@@ -11,7 +11,8 @@ def kv_manager():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=1,
     )
 
 
@@ -23,8 +24,8 @@ def test_allocate_and_write_prefix(kv_manager):
     assert seq.block_table.get_tokens_count() == 5
     assert len(seq.block_table.get_physical_blocks()) == 2
 
-    keys = torch.randn(5, 2, 8)
-    values = torch.randn(5, 2, 8)
+    keys = torch.randn(1, 5, 2, 8)
+    values = torch.randn(1, 5, 2, 8)
 
     slot_mapping = kv_manager.write_prefix_kv(seq, keys, values)
     assert len(slot_mapping) == 5
@@ -37,8 +38,8 @@ def test_single_token_kv_write(kv_manager):
     seq.append_token(50)
     kv_manager.allocate_slot_for_next_token(seq)
 
-    key_token = torch.randn(2, 8)
-    value_token = torch.randn(2, 8)
+    key_token = torch.randn(1, 2, 8)
+    value_token = torch.randn(1, 2, 8)
 
     kv_manager.write_single_token_kv(seq, key_token, value_token)
     assert seq.block_table.get_tokens_count() == 5
@@ -56,3 +57,33 @@ def test_free_sequence(kv_manager):
     kv_manager.free_sequence(seq)
     assert allocator.get_num_free_blocks() == initial_free
     assert seq.block_table is None
+
+
+def test_gather_kv_cache_round_trip():
+    manager = PagedKVCacheManager(
+        total_blocks=10,
+        block_size=4,
+        num_heads=2,
+        head_dim=8,
+        device="cpu",
+        num_layers=1,
+    )
+    seq = Sequence(seq_id=1, prompt_token_ids=[10, 20, 30, 40])
+    manager.allocate_prefix_blocks(seq)
+
+    keys = torch.randn(1, 4, 2, 8)
+    values = torch.randn(1, 4, 2, 8)
+    manager.write_prefix_kv(seq, keys, values)
+
+    gathered = manager.gather_kv_cache(seq, read_len=4)
+    assert gathered is not None
+    assert len(gathered) == 1
+
+    gathered_key, gathered_value = gathered[0]
+    assert gathered_key.shape == (1, 2, 4, 8)
+    assert gathered_value.shape == (1, 2, 4, 8)
+
+    original_key = keys[0].unsqueeze(0).transpose(1, 2)
+    original_value = values[0].unsqueeze(0).transpose(1, 2)
+    assert torch.allclose(gathered_key, original_key)
+    assert torch.allclose(gathered_value, original_value)

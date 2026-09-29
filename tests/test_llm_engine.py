@@ -12,7 +12,8 @@ def test_llm_engine_execution():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=16,
     )
     scheduler = Scheduler(
         kv_cache_manager=manager,
@@ -42,7 +43,8 @@ def test_llm_engine_prefill_kv_write():
         block_size=4,
         num_heads=2,
         head_dim=8,
-        device="cpu"
+        device="cpu",
+        num_layers=16,
     )
     scheduler = Scheduler(
         kv_cache_manager=manager,
