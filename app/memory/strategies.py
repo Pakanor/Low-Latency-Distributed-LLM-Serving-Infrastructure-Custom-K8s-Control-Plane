@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Tuple, Union
 import torch
 
 
@@ -126,9 +126,20 @@ class HipZeroCopyStrategy(KVCacheMemoryStrategy):
         return False
 
 
+def _is_rocm() -> bool:
+    return getattr(torch.version, "hip", None) is not None
+
+
+def strategy_from_device(device: Union[str, torch.device]) -> KVCacheMemoryStrategy:
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        return CpuKVCacheStrategy()
+    if _is_rocm():
+        return HipZeroCopyStrategy()
+    return CudaKVCacheStrategy(device_id=dev.index or 0)
+
+
 def detect_strategy() -> KVCacheMemoryStrategy:
-    if torch.cuda.is_available():
-        if getattr(torch.version, "hip", None) is not None:
-            return HipZeroCopyStrategy()
-        return CudaKVCacheStrategy()
-    return CpuKVCacheStrategy()
+    if not torch.cuda.is_available():
+        return CpuKVCacheStrategy()
+    return strategy_from_device("cuda")

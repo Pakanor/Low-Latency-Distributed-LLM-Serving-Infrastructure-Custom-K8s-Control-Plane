@@ -4,9 +4,8 @@ from typing import List, Tuple, Optional, Union
 from app.scheduler.sequence import Sequence, SequenceStatus
 from app.memory.strategies import (
     KVCacheMemoryStrategy,
-    CpuKVCacheStrategy,
-    CudaKVCacheStrategy,
     detect_strategy,
+    strategy_from_device,
 )
 
 
@@ -32,7 +31,7 @@ class PagedKVCacheManager:
         if strategy is not None:
             self.strategy = strategy
         elif device is not None:
-            self.strategy = _strategy_from_device(device)
+            self.strategy = strategy_from_device(device)
         else:
             self.strategy = detect_strategy()
 
@@ -212,10 +211,3 @@ class PagedKVCacheManager:
             seq.block_table.replace_block(old_id, new_id)
         self.swapped_seqs.discard(seq.seq_id)
         seq.status = SequenceStatus.RUNNING
-
-
-def _strategy_from_device(device: Union[str, torch.device]) -> KVCacheMemoryStrategy:
-    dev = torch.device(device)
-    if dev.type == "cuda":
-        return CudaKVCacheStrategy(device_id=dev.index or 0)
-    return CpuKVCacheStrategy()
