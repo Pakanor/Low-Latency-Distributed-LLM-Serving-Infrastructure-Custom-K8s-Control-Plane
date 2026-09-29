@@ -1,13 +1,28 @@
 from typing import List, Optional, Sequence as SequenceABC
 
 import torch
-import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from app.memory.manager import PagedKVCacheManager
+from app.model.attention_backends import AttentionBackend, TorchSdpBackend, select_backend
 from app.scheduler.sequence import Sequence
 
 PAGED_ATTENTION_NAME = "paged"
+
+_FALLBACK_BACKEND = TorchSdpBackend()
+_BACKEND: Optional[AttentionBackend] = None
+
+
+def _backend() -> AttentionBackend:
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = select_backend()
+    return _BACKEND
+
+
+def set_backend(backend: Optional[AttentionBackend]) -> None:
+    global _BACKEND
+    _BACKEND = backend
 
 
 class PagedStepContext:
@@ -121,22 +136,13 @@ def paged_attention_forward(
     new_values = value.squeeze(0).transpose(0, 1)
     store.scatter_layer_kv(layer_idx, new_keys, new_values, context.scatter_slots)
 
-    context_keys = store.gather_layer_keys(layer_idx, context.gather_slots)
-    context_values = store.gather_layer_values(layer_idx, context.gather_slots)
-    context_keys = context_keys.unsqueeze(0).transpose(1, 2)
-    context_values = context_values.unsqueeze(0).transpose(1, 2)
+    scale = scaling if scaling is not None else module.scaling
+    backend = _backend()
+    if not backend.supports(context, query.shape[2]):
+        backend = _FALLBACK_BACKEND
 
-    attn_output = F.scaled_dot_product_attention(
-        query,
-        context_keys,
-        context_values,
-        attn_mask=context.attention_mask(query.device),
-        dropout_p=dropout,
-        scale=scaling if scaling is not None else module.scaling,
-        enable_gqa=context_keys.shape[1] != query.shape[1],
-    )
-
-    return attn_output.transpose(1, 2).contiguous(), None
+    attn_output = backend.attend(query, store, layer_idx, context, scale, dropout)
+    return attn_output, None
 
 
 def register_paged_attention(model) -> None:
