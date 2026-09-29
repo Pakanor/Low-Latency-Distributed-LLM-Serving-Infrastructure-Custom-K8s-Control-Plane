@@ -32,5 +32,6 @@ set_engine(engine)
 
 print(f"KV cache strategy: {type(manager.strategy).__name__}")
 print(f"KV cache device: {manager.device}")
+print(f"KV cache swap pool zero-copy: {manager.get_allocator().is_zero_copy()}")
 
 uvicorn.run(app, host="0.0.0.0", port=8000)
