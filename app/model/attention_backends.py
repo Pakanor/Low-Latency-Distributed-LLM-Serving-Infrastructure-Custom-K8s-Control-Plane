@@ -17,7 +17,11 @@ NATIVE_BACKEND = "native"
 
 
 def native_kernel_available() -> bool:
-    return hasattr(llm_allocator_cpp, "paged_attention")
+    if not hasattr(llm_allocator_cpp, "paged_attention"):
+        return False
+    if not torch.cuda.is_available():
+        return False
+    return True
 
 
 class AttentionBackend(ABC):
@@ -95,15 +99,22 @@ class NativePagedBackend(AttentionBackend):
                 "llm_allocator_cpp does not export paged_attention; "
                 "rebuild the extension with a ROCm toolchain to enable the native backend"
             )
-        return llm_allocator_cpp.paged_attention(
+        query = query.contiguous()
+        key_cache = store.key_cache.contiguous()
+        value_cache = store.value_cache.contiguous()
+        attention_mask = context.attention_mask(query.device).to(torch.uint8).contiguous()
+        gather_slots = context.gather_slots.to(torch.int32).contiguous()
+
+        output = llm_allocator_cpp.paged_attention(
             query,
-            store.key_cache,
-            store.value_cache,
+            key_cache,
+            value_cache,
             layer_idx,
-            context.gather_slots,
-            context.cu_context_offsets,
+            gather_slots,
+            attention_mask,
             scaling,
         )
+        return torch.from_numpy(output).to(query.device)
 
 
 _BACKENDS = {
