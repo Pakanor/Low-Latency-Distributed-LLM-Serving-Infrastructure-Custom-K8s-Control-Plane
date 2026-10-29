@@ -213,7 +213,14 @@ class LLMEngine:
         for sequences, is_prefill in ((prefills, True), (decodes, False)):
             if not sequences:
                 continue
-            for seq, next_token in zip(sequences, self._forward_group(sequences, is_prefill)):
+            valid = []
+            for seq in sequences:
+                if self.kv_cache_manager is not None and getattr(seq, 'block_table', None) is None:
+                    continue
+                valid.append(seq)
+            if not valid:
+                continue
+            for seq, next_token in zip(valid, self._forward_group(valid, is_prefill)):
                 seq.append_token(next_token)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
