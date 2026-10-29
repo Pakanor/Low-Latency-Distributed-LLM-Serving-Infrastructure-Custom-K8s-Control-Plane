@@ -22,14 +22,17 @@ struct Block {
 
 class PageAllocator {
 public:
-    PageAllocator(size_t total_blocks, size_t block_size_bytes, size_t total_cpu_blocks = 32)
-        : total_blocks_(total_blocks), block_size_(block_size_bytes), total_cpu_blocks_(total_cpu_blocks) {
-        if (block_size_bytes == 0) {
-            throw std::invalid_argument("block_size must be greater than 0");
+    PageAllocator(size_t total_blocks, size_t tokens_per_block, size_t bytes_per_token, size_t total_cpu_blocks = 32)
+        : total_blocks_(total_blocks), tokens_per_block_(tokens_per_block), bytes_per_token_(bytes_per_token), total_cpu_blocks_(total_cpu_blocks) {
+        if (tokens_per_block == 0) {
+            throw std::invalid_argument("tokens_per_block must be greater than 0");
+        }
+        if (bytes_per_token == 0) {
+            throw std::invalid_argument("bytes_per_token must be greater than 0");
         }
 
-        
-        size_t total_ram_bytes = total_cpu_blocks_ * block_size_;
+        size_t block_size_bytes = tokens_per_block_ * bytes_per_token_;
+        size_t total_ram_bytes = total_cpu_blocks_ * block_size_bytes;
         int ret = posix_memalign(&base_host_ptr_, 4096, total_ram_bytes);
         if (ret != 0 || !base_host_ptr_) {
             throw std::bad_alloc();
@@ -45,7 +48,7 @@ public:
         cpu_block_ptrs_.resize(total_cpu_blocks_);
         for (size_t i = 0; i < total_cpu_blocks_; ++i) {
             cpu_free_blocks_.push_back(static_cast<int>(i));
-            cpu_block_ptrs_[i] = byte_ptr + (i * block_size_);
+            cpu_block_ptrs_[i] = byte_ptr + (i * block_size_bytes);
         }
     }
 
@@ -196,7 +199,11 @@ public:
         return reinterpret_cast<uintptr_t>(cpu_block_ptrs_[it->second]);
     }
 
-    size_t get_block_size() const { return block_size_; }
+    size_t get_block_size() const { return tokens_per_block_; }
+
+    size_t get_bytes_per_token() const { return bytes_per_token_; }
+
+    size_t get_host_pool_bytes() const { return total_cpu_blocks_ * tokens_per_block_ * bytes_per_token_; }
 
     size_t get_num_free_blocks() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -224,7 +231,8 @@ private:
     }
 
     size_t total_blocks_;
-    size_t block_size_;
+    size_t tokens_per_block_;
+    size_t bytes_per_token_;
     size_t total_cpu_blocks_;
     
     void* base_host_ptr_{nullptr};

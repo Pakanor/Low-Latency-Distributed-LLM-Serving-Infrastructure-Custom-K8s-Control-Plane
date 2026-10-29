@@ -1,5 +1,6 @@
 import pytest
 import torch
+import llm_allocator_cpp
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.sequence import Sequence
 
@@ -87,3 +88,25 @@ def test_gather_kv_cache_round_trip():
     original_value = values[0].unsqueeze(0).transpose(1, 2)
     assert torch.allclose(gathered_key, original_key)
     assert torch.allclose(gathered_value, original_value)
+
+
+def test_block_size_is_tokens_not_bytes():
+    # Geometry: 2 heads x 8 head_dim x float32, K+V = 128 bytes/token
+    num_heads = 2
+    head_dim = 8
+    dtype = torch.float32
+    bytes_per_token = num_heads * head_dim * dtype.itemsize * 2  # K + V = 128
+    tokens_per_block = 4
+    total_cpu_blocks = 32
+
+    allocator = llm_allocator_cpp.PageAllocator(
+        total_blocks=10,
+        tokens_per_block=tokens_per_block,
+        bytes_per_token=bytes_per_token,
+        total_cpu_blocks=total_cpu_blocks,
+    )
+
+    assert allocator.get_block_size() == tokens_per_block
+    assert allocator.get_bytes_per_token() == bytes_per_token
+    expected_pool_bytes = total_cpu_blocks * tokens_per_block * bytes_per_token
+    assert allocator.get_host_pool_bytes() == expected_pool_bytes
