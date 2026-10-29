@@ -28,13 +28,15 @@ class LLMEngine:
     def add_request(
         self,
         prompt_token_ids: List[int],
-        max_tokens: int = 128
+        max_tokens: int = 128,
+        eos_token_id: Optional[int] = None,
     ) -> Sequence:
         self.seq_counter += 1
         seq = Sequence(
             seq_id=self.seq_counter,
             prompt_token_ids=prompt_token_ids,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            eos_token_id=eos_token_id,
         )
         self.scheduler.add_sequence(seq)
         return seq

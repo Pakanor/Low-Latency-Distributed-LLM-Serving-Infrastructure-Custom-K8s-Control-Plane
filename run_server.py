@@ -6,8 +6,8 @@ from app.api.server import set_engine, app, load_model
 import uvicorn
 
 manager = PagedKVCacheManager(
-    total_blocks=10,
-    block_size=4,
+    total_blocks=256,
+    block_size=16,
     num_heads=8,
     head_dim=64,
     num_layers=16,
@@ -16,7 +16,7 @@ scheduler = Scheduler(
     kv_cache_manager=manager,
     max_batch_size=2,
     max_num_batched_tokens=32,
-    block_size=4,
+    block_size=16,
     allocator=manager.get_allocator(),
 )
 
