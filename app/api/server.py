@@ -231,14 +231,27 @@ async def metrics():
     lines = []
     if engine is not None:
         try:
-            alloc = engine.kv_cache_manager.get_allocator() if hasattr(engine.kv_cache_manager, "get_allocator") else engine.scheduler.allocator
-            free = alloc.get_num_free_blocks()
-            total = alloc.get_total_blocks() if hasattr(alloc, "get_total_blocks") else alloc.get_num_total_blocks()
+            alloc = None
+            if hasattr(engine.kv_cache_manager, "get_allocator"):
+                alloc = engine.kv_cache_manager.get_allocator()
+            elif hasattr(engine.scheduler, "allocator"):
+                alloc = engine.scheduler.allocator
+            if alloc is not None:
+                free = alloc.get_num_free_blocks()
+                if hasattr(alloc, "get_total_blocks"):
+                    total = alloc.get_total_blocks()
+                elif hasattr(alloc, "get_num_total_blocks"):
+                    total = alloc.get_num_total_blocks()
+                else:
+                    total = getattr(engine.kv_cache_manager, "total_blocks", 1)
+            else:
+                free = 0
+                total = 1
         except Exception:
             free = 0
             total = 1
         ratio = (free / total) if total else 0.0
-        active = len(engine.scheduler.running) if hasattr(engine.scheduler, "running") else 0
+        active = len(getattr(engine.scheduler, "running", []))
         preemptions = getattr(engine.scheduler, "preemption_count", 0)
         lines.append(f"kv_cache_free_pages_ratio {ratio}")
         lines.append(f"kv_cache_active_streams {active}")
