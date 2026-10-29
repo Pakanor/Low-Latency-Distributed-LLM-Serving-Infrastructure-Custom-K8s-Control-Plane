@@ -65,7 +65,7 @@ class LLMEngine:
         seq: Optional[Sequence] = None,
     ) -> Tuple[int, Optional[Tuple[torch.Tensor, ...]]]:
         past_kv = None
-        if not is_prefill and seq is not None and self.kv_cache_manager is not None:
+        if not is_prefill and seq is not None and self.kv_cache_manager is not None and seq.block_table is not None:
             read_len = seq.block_table.get_tokens_count() - 1
             past_kv = self.kv_cache_manager.gather_kv_cache(seq, read_len=read_len)
 
@@ -131,9 +131,12 @@ class LLMEngine:
             start_positions = [0] * len(sequences)
         else:
             token_lists = [self._last_decode_token(seq) for seq in sequences]
-            start_positions = [
-                seq.block_table.get_tokens_count() - 1 for seq in sequences
-            ]
+            start_positions = []
+            for seq in sequences:
+                if seq.block_table is not None:
+                    start_positions.append(seq.block_table.get_tokens_count() - 1)
+                else:
+                    start_positions.append(max(0, len(seq.prompt_token_ids) + len(seq.output_token_ids) - 1))
         return token_lists, start_positions
 
     def _last_decode_token(self, seq: Sequence) -> List[int]:
