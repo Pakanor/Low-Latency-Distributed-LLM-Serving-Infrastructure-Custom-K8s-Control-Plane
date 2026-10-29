@@ -40,7 +40,11 @@ class LLMEngine:
         return seq
 
     def has_unfinished_requests(self) -> bool:
-        return self.scheduler.has_unfinished_sequences()
+        # Check if any sequence is not finished
+        for seq in self.scheduler.waiting + self.scheduler.running:
+            if seq.status != SequenceStatus.FINISHED:
+                return True
+        return False
 
     def _local_generate_step(
         self,
@@ -50,9 +54,12 @@ class LLMEngine:
         seq: Optional[Sequence] = None,
     ) -> Tuple[int, Optional[Tuple[torch.Tensor, ...]]]:
         past_kv = None
-        if not is_prefill and seq is not None and self.kv_cache_manager is not None:
+        if not is_prefill and seq is not None and self.kv_cache_manager is not None and seq.block_table is not None:
             read_len = seq.block_table.get_tokens_count() - 1
             past_kv = self.kv_cache_manager.gather_kv_cache(seq, read_len=read_len)
+        elif is_prefill and seq is not None and seq.block_table is not None and len(seq.output_token_ids) > 0 and self.kv_cache_manager is not None:
+            # After preemption, we need to recompute KV for full context
+            past_kv = None
 
         if self.model is None or not callable(getattr(self.model, "forward", None)):
             assert self.model_client is not None
@@ -121,9 +128,19 @@ class LLMEngine:
         all_active_seqs = prefills + decodes
 
         for seq in prefills:
+            input_ids = seq.get_token_ids()
             next_token, _ = self._local_generate_step(
-                seq.seq_id, seq.prompt_token_ids, is_prefill=True, seq=seq
+                seq.seq_id, input_ids, is_prefill=True, seq=seq
             )
+            if len(seq.output_token_ids) >= seq.max_tokens:
+                continue
+            expected = len(input_ids) - len(seq.prompt_token_ids)
+            if len(seq.output_token_ids) >= expected:
+                # For normal prefill, we just generated next token
+                if len(seq.output_token_ids) == expected:
+                    seq.append_token(next_token)
+                    continue
+                continue
             seq.append_token(next_token)
 
         for seq in decodes:

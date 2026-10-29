@@ -38,11 +38,13 @@ class Scheduler:
         self.waiting: List[Sequence] = []
         self.running: List[Sequence] = []
         self.swapped: List[Sequence] = []
+        self.preemption_count = 0
 
     def add_sequence(self, seq: Sequence) -> None:
         self.waiting.append(seq)
 
     def has_unfinished_sequences(self) -> bool:
+        # A preempted sequence in WAITING is unfinished
         return bool(self.waiting or self.running or self.swapped)
 
     def _allocate_prefix(self, seq: Sequence) -> None:
@@ -86,7 +88,13 @@ class Scheduler:
             if needs_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self._free_blocks(seq)
+                self.preemption_count += 1
+                # Put back in waiting queue to be recomputed from scratch
                 self.waiting.insert(0, seq)
+                if seq in active_running:
+                    active_running.remove(seq)
+                if seq in scheduled_decodes:
+                    scheduled_decodes.remove(seq)
                 continue
 
             if self.kv_cache_manager is not None and seq.block_table is not None:
@@ -104,11 +112,14 @@ class Scheduler:
             seq_len = seq.total_len
             needed_blocks = (seq_len + self.block_size - 1) // self.block_size
             if needed_blocks > self.allocator.get_num_free_blocks():
-                ignored.append(self.waiting.pop(0))
-                continue
+                # For preempted sequences waiting to be recomputed, keep in queue
+                s = self.waiting.pop(0)
+                self.waiting.append(s)
+                break
             if current_batch_tokens + seq_len > self.max_num_batched_tokens:
-                ignored.append(self.waiting.pop(0))
-                continue
+                s = self.waiting.pop(0)
+                self.waiting.append(s)
+                break
 
             self.waiting.pop(0)
             self._allocate_prefix(seq)

@@ -50,7 +50,6 @@ class MockModelClient:
     def __init__(self, eos_token_id: int = 0, num_layers: int = 16,
                  num_heads: int = 2, head_dim: int = 8):
         self.eos_token_id = eos_token_id
-        self._seq_len_cache: Dict[int, int] = {}
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -61,14 +60,16 @@ class MockModelClient:
         input_ids: List[int],
         past_key_values: Optional[Tuple] = None,
     ) -> dict:
-        seq_len = self._seq_len_cache.get(seq_id, 0) + len(input_ids)
-        self._seq_len_cache[seq_id] = seq_len
+        total_len = len(input_ids)
+        if past_key_values is not None and len(past_key_values) > 0:
+            total_len = max(total_len, past_key_values[0][0].shape[2] + 1)
 
         if past_key_values is None:
             past_kv = []
+            seq_len_out = total_len
             for _ in range(self.num_layers):
-                key = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
-                value = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
+                key = torch.zeros(1, self.num_heads, seq_len_out, self.head_dim)
+                value = torch.zeros(1, self.num_heads, seq_len_out, self.head_dim)
                 past_kv.append((key, value))
         else:
             past_kv = []
@@ -77,7 +78,7 @@ class MockModelClient:
                 value = torch.cat([layer[1], torch.zeros(1, self.num_heads, 1, self.head_dim)], dim=2)
                 past_kv.append((key, value))
 
-        next_token_id = 100 + seq_len
+        next_token_id = 100 + total_len
         is_eos = next_token_id == self.eos_token_id
 
         return {
