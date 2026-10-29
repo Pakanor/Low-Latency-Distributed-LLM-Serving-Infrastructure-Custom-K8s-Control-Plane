@@ -84,3 +84,22 @@ int main() {
 
     return 0;
 }
+
+#include <thread>
+#include <atomic>
+
+void run_concurrent_request(llm_infra::PageAllocator& allocator, size_t num_tokens) {
+    llm_infra::SequenceBlockTable table(allocator);
+    for (size_t t = 0; t < num_tokens; ++t) {
+        table.append_token(allocator);
+    }
+    table.release(allocator);
+}
+
+void run_concurrent_request(llm_infra::PageAllocator& allocator, size_t num_tokens) {
+    llm_infra::SequenceBlockTable table(allocator);
+    for (size_t t = 0; t < num_tokens; ++t) {
+        table.append_token(allocator);
+    }
+    table.release(allocator);
+}
