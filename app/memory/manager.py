@@ -5,7 +5,6 @@ from app.scheduler.sequence import Sequence, SequenceStatus
 from app.memory.strategies import (
     KVCacheMemoryStrategy,
     CpuKVCacheStrategy,
-    CudaKVCacheStrategy,
     detect_strategy,
 )
 
@@ -215,7 +214,4 @@ class PagedKVCacheManager:
 
 
 def _strategy_from_device(device: Union[str, torch.device]) -> KVCacheMemoryStrategy:
-    dev = torch.device(device)
-    if dev.type == "cuda":
-        return CudaKVCacheStrategy(device_id=dev.index or 0)
     return CpuKVCacheStrategy()
