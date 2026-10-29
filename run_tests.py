@@ -3,8 +3,9 @@ import sys
 import os
 import subprocess
 
-os.chdir('/home/roberto/llm-infra')
-sys.path.insert(0, '/home/roberto/llm-infra')
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+os.chdir(REPO_ROOT)
+sys.path.insert(0, REPO_ROOT)
 
 tests = [
         "tests/test_sequence.py",
