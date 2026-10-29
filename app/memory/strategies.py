@@ -35,11 +35,6 @@ class KVCacheMemoryStrategy(ABC):
     def device(self) -> torch.device:
         pass
 
-    @property
-    @abstractmethod
-    def requires_copy_on_swap(self) -> bool:
-        pass
-
 
 class CpuKVCacheStrategy(KVCacheMemoryStrategy):
 
@@ -62,10 +57,6 @@ class CpuKVCacheStrategy(KVCacheMemoryStrategy):
 
     def sync(self) -> None:
         pass
-
-    @property
-    def requires_copy_on_swap(self) -> bool:
-        return False
 
 
 def detect_strategy() -> KVCacheMemoryStrategy:
