@@ -4,12 +4,38 @@ from typing import List, Tuple, Optional, Union
 from app.scheduler.sequence import Sequence, SequenceStatus
 from app.memory.strategies import (
     KVCacheMemoryStrategy,
-    CpuKVCacheStrategy,
     detect_strategy,
+    strategy_from_device,
 )
 
 
 class PagedKVCacheManager:
+    @classmethod
+    def from_model_config(
+        cls,
+        config,
+        total_blocks: int,
+        block_size: int,
+        total_cpu_blocks: int = 32,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[Union[str, torch.device]] = None,
+        strategy: Optional[KVCacheMemoryStrategy] = None,
+    ) -> "PagedKVCacheManager":
+        num_attention_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", num_attention_heads)
+        head_dim = getattr(config, "head_dim", config.hidden_size // num_attention_heads)
+        return cls(
+            total_blocks=total_blocks,
+            block_size=block_size,
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            total_cpu_blocks=total_cpu_blocks,
+            dtype=dtype,
+            num_layers=config.num_hidden_layers,
+            device=device,
+            strategy=strategy,
+        )
+
     def __init__(
         self,
         total_blocks: int,
@@ -31,17 +57,15 @@ class PagedKVCacheManager:
         if strategy is not None:
             self.strategy = strategy
         elif device is not None:
-            self.strategy = _strategy_from_device(device)
+            self.strategy = strategy_from_device(device)
         else:
             self.strategy = detect_strategy()
 
+        self.allocator = llm_allocator_cpp.PageAllocator(total_blocks, block_size, total_cpu_blocks)
+        self.swapped_seqs = set()
+
         self.key_cache, self.value_cache = self.strategy.allocate_cache(
             total_blocks, block_size, num_layers, num_heads, head_dim, dtype
-        )
-
-        bytes_per_token = num_heads * head_dim * dtype.itemsize * 2
-        self.allocator = llm_allocator_cpp.PageAllocator(
-            total_blocks, block_size, bytes_per_token, total_cpu_blocks
         )
 
     @property
@@ -73,6 +97,76 @@ class PagedKVCacheManager:
             seq.block_table.release(self.allocator)
             seq.block_table = None
 
+    def build_slot_mapping(
+        self,
+        sequences: List[Sequence],
+        start_tokens: List[int],
+        token_counts: List[int],
+    ) -> torch.Tensor:
+        if not (len(sequences) == len(start_tokens) == len(token_counts)):
+            raise ValueError(
+                f"sequences ({len(sequences)}), start_tokens ({len(start_tokens)}) "
+                f"and token_counts ({len(token_counts)}) must have the same length"
+            )
+
+        if not sequences:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        chunks = [
+            self._sequence_slots(seq, start, count)
+            for seq, start, count in zip(sequences, start_tokens, token_counts)
+        ]
+        chunks = [chunk for chunk in chunks if chunk.numel() > 0]
+        if not chunks:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+        return torch.cat(chunks)
+
+    def scatter_kv(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        self._validate_token_tensors(
+            keys,
+            values,
+            (slot_mapping.numel(), self.num_layers, self.num_heads, self.head_dim),
+        )
+
+        for layer_idx in range(self.num_layers):
+            self.scatter_layer_kv(
+                layer_idx,
+                keys[:, layer_idx],
+                values[:, layer_idx],
+                slot_mapping,
+            )
+
+    def scatter_layer_kv(
+        self,
+        layer_idx: int,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        self._validate_layer_idx(layer_idx)
+        self._validate_token_tensors(
+            keys,
+            values,
+            (slot_mapping.numel(), self.num_heads, self.head_dim),
+        )
+
+        if slot_mapping.numel() == 0:
+            return
+
+        self.key_cache[layer_idx].view(-1, self.num_heads, self.head_dim)[slot_mapping] = keys
+        self.value_cache[layer_idx].view(-1, self.num_heads, self.head_dim)[slot_mapping] = values
+
+    def gather_layer_keys(self, layer_idx: int, slot_indices: torch.Tensor) -> torch.Tensor:
+        return self._gather_layer(self.key_cache, layer_idx, slot_indices)
+
+    def gather_layer_values(self, layer_idx: int, slot_indices: torch.Tensor) -> torch.Tensor:
+        return self._gather_layer(self.value_cache, layer_idx, slot_indices)
+
     def write_prefix_kv(
         self,
         seq: Sequence,
@@ -86,20 +180,8 @@ class PagedKVCacheManager:
         if seq_len == 0 or seq.block_table is None:
             return torch.empty((0,), dtype=torch.long, device=self.device)
 
-        physical_blocks = seq.block_table.get_physical_blocks()
-
-        block_offsets = torch.tensor(
-            physical_blocks, dtype=torch.long, device=self.device
-        ) * self.block_size
-        slot_offsets = torch.arange(
-            self.block_size, dtype=torch.long, device=self.device
-        )
-
-        all_slots = (block_offsets.unsqueeze(1) + slot_offsets.unsqueeze(0)).flatten()
-        slot_mapping = all_slots[:seq_len]
-
-        self.key_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = keys.transpose(0, 1)
-        self.value_cache.view(-1, self.num_layers, self.num_heads, self.head_dim)[slot_mapping] = values.transpose(0, 1)
+        slot_mapping = self.build_slot_mapping([seq], [0], [seq_len])
+        self.scatter_kv(keys.transpose(0, 1), values.transpose(0, 1), slot_mapping)
 
         return slot_mapping
 
@@ -111,14 +193,9 @@ class PagedKVCacheManager:
     ) -> None:
         assert seq.block_table is not None
         token_index = seq.block_table.get_tokens_count() - 1
-        physical_blocks = seq.block_table.get_physical_blocks()
 
-        block_idx = token_index // self.block_size
-        slot_idx = token_index % self.block_size
-        physical_block_id = physical_blocks[block_idx]
-
-        self.key_cache[physical_block_id, slot_idx] = key_token
-        self.value_cache[physical_block_id, slot_idx] = value_token
+        slot_mapping = self.build_slot_mapping([seq], [token_index], [1])
+        self.scatter_kv(key_token.unsqueeze(0), value_token.unsqueeze(0), slot_mapping)
 
     def gather_kv_cache(
         self,
@@ -137,19 +214,15 @@ class PagedKVCacheManager:
         if read_len <= 0:
             return None
 
-        block_data = torch.stack([self.key_cache[bid] for bid in physical_blocks])
-        block_data_v = torch.stack([self.value_cache[bid] for bid in physical_blocks])
-
-        flat_k = block_data.view(-1, self.num_layers, self.num_heads, self.head_dim)[:read_len]
-        flat_v = block_data_v.view(-1, self.num_layers, self.num_heads, self.head_dim)[:read_len]
-
         result = []
         for layer_idx in range(self.num_layers):
-            key = flat_k[:, layer_idx, :, :]
-            value = flat_v[:, layer_idx, :, :]
-            key = key.unsqueeze(0).transpose(1, 2)
-            value = value.unsqueeze(0).transpose(1, 2)
-            result.append((key, value))
+            key = self.key_cache[layer_idx]
+            value = self.value_cache[layer_idx]
+            block_data = torch.stack([key[bid] for bid in physical_blocks])
+            block_data_v = torch.stack([value[bid] for bid in physical_blocks])
+            flat_k = block_data.view(-1, self.num_heads, self.head_dim)[:read_len]
+            flat_v = block_data_v.view(-1, self.num_heads, self.head_dim)[:read_len]
+            result.append((flat_k.unsqueeze(0).transpose(1, 2), flat_v.unsqueeze(0).transpose(1, 2)))
 
         return tuple(result)
 
@@ -190,6 +263,88 @@ class PagedKVCacheManager:
             context_lens_cpu.to(self.device, non_blocking=True)
         )
 
+    def _validate_layer_idx(self, layer_idx: int) -> None:
+        if layer_idx < 0 or layer_idx >= self.num_layers:
+            raise ValueError(
+                f"Layer index {layer_idx} out of range (num_layers={self.num_layers})"
+            )
 
-def _strategy_from_device(device: Union[str, torch.device]) -> KVCacheMemoryStrategy:
-    return CpuKVCacheStrategy()
+    def _validate_token_tensors(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        expected_shape: Tuple[int, ...],
+    ) -> None:
+        if keys.shape != values.shape:
+            raise ValueError(f"Keys shape {keys.shape} != Values shape {values.shape}")
+        if tuple(keys.shape) != expected_shape:
+            raise ValueError(f"Expected keys shape {expected_shape}, got {tuple(keys.shape)}")
+
+    def _gather_layer(
+        self,
+        cache: torch.Tensor,
+        layer_idx: int,
+        slot_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        self._validate_layer_idx(layer_idx)
+        return cache[layer_idx].view(-1, self.num_heads, self.head_dim).index_select(
+            0, slot_indices
+        )
+
+    def _sequence_slots(self, seq: Sequence, start_token: int, token_count: int) -> torch.Tensor:
+        if seq.block_table is None:
+            raise ValueError(f"Sequence {seq.seq_id} has no block table")
+        if start_token < 0 or token_count < 0:
+            raise ValueError(
+                f"Sequence {seq.seq_id}: start_token ({start_token}) and "
+                f"token_count ({token_count}) must be non-negative"
+            )
+
+        tokens_count = seq.block_table.get_tokens_count()
+        if start_token + token_count > tokens_count:
+            raise ValueError(
+                f"Sequence {seq.seq_id}: tokens [{start_token}, {start_token + token_count}) "
+                f"exceed allocated tokens ({tokens_count})"
+            )
+
+        if token_count == 0:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+
+        first_block = start_token // self.block_size
+        last_block = (start_token + token_count - 1) // self.block_size
+        physical_blocks = seq.block_table.get_physical_blocks()[first_block:last_block + 1]
+
+        block_offsets = torch.tensor(
+            physical_blocks, dtype=torch.long, device=self.device
+        ) * self.block_size
+        slot_offsets = torch.arange(
+            self.block_size, dtype=torch.long, device=self.device
+        )
+        all_slots = (block_offsets.unsqueeze(1) + slot_offsets.unsqueeze(0)).flatten()
+
+        offset = start_token - (first_block * self.block_size)
+        return all_slots[offset:offset + token_count]
+
+    def swap_out_sequence(self, seq: Sequence) -> None:
+        assert seq.block_table is not None
+        physical_blocks = seq.block_table.get_physical_blocks()
+
+        if self.strategy.requires_copy_on_swap:
+            pass
+
+        for block_id in physical_blocks:
+            self.allocator.swap_out(block_id)
+        self.swapped_seqs.add(seq.seq_id)
+        seq.status = SequenceStatus.SWAPPED
+
+    def swap_in_sequence(self, seq: Sequence) -> None:
+        assert seq.block_table is not None
+        old_physical_blocks = seq.block_table.get_physical_blocks()
+        new_physical_blocks = []
+        for block_id in old_physical_blocks:
+            new_block = self.allocator.swap_in(block_id)
+            new_physical_blocks.append(new_block)
+        for old_id, new_id in zip(old_physical_blocks, new_physical_blocks):
+            seq.block_table.replace_block(old_id, new_id)
+        self.swapped_seqs.discard(seq.seq_id)
+        seq.status = SequenceStatus.RUNNING

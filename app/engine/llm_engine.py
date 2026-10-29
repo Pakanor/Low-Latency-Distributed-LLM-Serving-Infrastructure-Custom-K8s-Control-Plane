@@ -6,6 +6,11 @@ from app.scheduler.sequence import Sequence, SequenceStatus
 from app.scheduler.scheduler import Scheduler
 from app.memory.manager import PagedKVCacheManager
 from app.model.client import K8sModelClient
+from app.model.paged_attention import (
+    PagedStepContext,
+    register_paged_attention,
+    run_paged_forward,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,29 +29,33 @@ class LLMEngine:
         self.model = model
         self.seq_counter = 0
         self.update_event: Optional[asyncio.Event] = None
+        self._paged_attention_registered = False
+
+    @property
+    def model_device(self) -> torch.device:
+        if self.model is None:
+            return torch.device("cpu")
+        try:
+            return next(self.model.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
 
     def add_request(
         self,
         prompt_token_ids: List[int],
-        max_tokens: int = 128,
-        eos_token_id: Optional[int] = None,
+        max_tokens: int = 128
     ) -> Sequence:
         self.seq_counter += 1
         seq = Sequence(
             seq_id=self.seq_counter,
             prompt_token_ids=prompt_token_ids,
-            max_tokens=max_tokens,
-            eos_token_id=eos_token_id,
+            max_tokens=max_tokens
         )
         self.scheduler.add_sequence(seq)
         return seq
 
     def has_unfinished_requests(self) -> bool:
-        # Check if any sequence is not finished
-        for seq in self.scheduler.waiting + self.scheduler.running:
-            if seq.status != SequenceStatus.FINISHED:
-                return True
-        return False
+        return self.scheduler.has_unfinished_sequences()
 
     def _local_generate_step(
         self,
@@ -56,12 +65,9 @@ class LLMEngine:
         seq: Optional[Sequence] = None,
     ) -> Tuple[int, Optional[Tuple[torch.Tensor, ...]]]:
         past_kv = None
-        if not is_prefill and seq is not None and self.kv_cache_manager is not None and seq.block_table is not None:
+        if not is_prefill and seq is not None and self.kv_cache_manager is not None:
             read_len = seq.block_table.get_tokens_count() - 1
             past_kv = self.kv_cache_manager.gather_kv_cache(seq, read_len=read_len)
-        elif is_prefill and seq is not None and seq.block_table is not None and len(seq.output_token_ids) > 0 and self.kv_cache_manager is not None:
-            # After preemption, we need to recompute KV for full context
-            past_kv = None
 
         if self.model is None or not callable(getattr(self.model, "forward", None)):
             assert self.model_client is not None
@@ -114,6 +120,78 @@ class LLMEngine:
             last_values = values[:, -1]
             self.kv_cache_manager.write_single_token_kv(seq, last_keys, last_values)
 
+    def _group_inputs(
+        self,
+        sequences: List[Sequence],
+        is_prefill: bool,
+    ) -> Tuple[List[List[int]], List[int]]:
+        """Tokens each sequence contributes to this step, and where they land."""
+        if is_prefill:
+            token_lists = [seq.prompt_token_ids for seq in sequences]
+            start_positions = [0] * len(sequences)
+        else:
+            token_lists = [self._last_decode_token(seq) for seq in sequences]
+            start_positions = [
+                seq.block_table.get_tokens_count() - 1 for seq in sequences
+            ]
+        return token_lists, start_positions
+
+    def _last_decode_token(self, seq: Sequence) -> List[int]:
+        if seq.output_token_ids:
+            return [seq.output_token_ids[-1]]
+        return [seq.prompt_token_ids[-1]]
+
+    def _ensure_paged_attention(self) -> None:
+        if self._paged_attention_registered:
+            return
+        register_paged_attention(self.model)
+        self._paged_attention_registered = True
+
+    def _paged_forward_group(
+        self,
+        sequences: List[Sequence],
+        is_prefill: bool,
+    ) -> List[int]:
+        self._ensure_paged_attention()
+
+        token_lists, start_positions = self._group_inputs(sequences, is_prefill)
+        new_token_counts = [len(tokens) for tokens in token_lists]
+
+        flat_input = torch.tensor(
+            [token for tokens in token_lists for token in tokens],
+            dtype=torch.long,
+            device=self.model_device,
+        ).unsqueeze(0)
+
+        context = PagedStepContext(
+            self.kv_cache_manager,
+            sequences,
+            start_positions,
+            new_token_counts,
+        )
+        logits = run_paged_forward(self.model, context, flat_input)
+
+        cu_seqlens = context.cu_seqlens
+        return [
+            int(logits[0, int(cu_seqlens[index + 1]) - 1].argmax())
+            for index in range(len(sequences))
+        ]
+
+    def _forward_group(
+        self,
+        sequences: List[Sequence],
+        is_prefill: bool,
+    ) -> List[int]:
+        if self.model is None or not callable(getattr(self.model, "forward", None)):
+            token_lists, _ = self._group_inputs(sequences, is_prefill)
+            return [
+                self._local_generate_step(
+                    seq.seq_id, tokens, is_prefill=is_prefill, seq=seq
+                )[0]
+                for seq, tokens in zip(sequences, token_lists)
+            ]
+        return self._paged_forward_group(sequences, is_prefill)
+
     def step(self) -> Dict[str, List[Sequence]]:
         try:
             outputs = self.scheduler.schedule()
@@ -129,28 +207,11 @@ class LLMEngine:
 
         all_active_seqs = prefills + decodes
 
-        for seq in prefills:
-            input_ids = seq.get_token_ids()
-            next_token, _ = self._local_generate_step(
-                seq.seq_id, input_ids, is_prefill=True, seq=seq
-            )
-            if len(seq.output_token_ids) >= seq.max_tokens:
+        for sequences, is_prefill in ((prefills, True), (decodes, False)):
+            if not sequences:
                 continue
-            expected = len(input_ids) - len(seq.prompt_token_ids)
-            if len(seq.output_token_ids) >= expected:
-                # For normal prefill, we just generated next token
-                if len(seq.output_token_ids) == expected:
-                    seq.append_token(next_token)
-                    continue
-                continue
-            seq.append_token(next_token)
-
-        for seq in decodes:
-            last_token = [seq.output_token_ids[-1]] if seq.output_token_ids else [seq.prompt_token_ids[-1]]
-            next_token, _ = self._local_generate_step(
-                seq.seq_id, last_token, is_prefill=False, seq=seq
-            )
-            seq.append_token(next_token)
+            for seq, next_token in zip(sequences, self._forward_group(sequences, is_prefill)):
+                seq.append_token(next_token)
 
         finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
         running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
