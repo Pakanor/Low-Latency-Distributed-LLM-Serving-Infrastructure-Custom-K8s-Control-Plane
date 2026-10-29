@@ -86,6 +86,7 @@ class Scheduler:
             if needs_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self._free_blocks(seq)
+                self.preemption_count += 1
                 self.waiting.insert(0, seq)
                 continue
 
