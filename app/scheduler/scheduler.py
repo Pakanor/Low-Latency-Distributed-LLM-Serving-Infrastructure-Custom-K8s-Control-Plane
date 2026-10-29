@@ -34,6 +34,7 @@ class Scheduler:
             raise ValueError("Scheduler requires a positive block_size")
         self.max_batch_size = max_batch_size
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.preemption_count = 0
 
         self.waiting: List[Sequence] = []
         self.running: List[Sequence] = []
@@ -86,6 +87,7 @@ class Scheduler:
             if needs_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self._free_blocks(seq)
+                self.preemption_count += 1
                 self.waiting.insert(0, seq)
                 continue
 

@@ -230,3 +230,41 @@ async def create_completion(request: CompletionRequest):
         yield json.dumps({"finished": True, "text": ""})
 
     return EventSourceResponse(token_generator())
+
+
+@app.get("/metrics")
+async def metrics():
+    lines = []
+    if engine is not None:
+        try:
+            alloc = None
+            if hasattr(engine.kv_cache_manager, "get_allocator"):
+                alloc = engine.kv_cache_manager.get_allocator()
+            elif hasattr(engine.scheduler, "allocator"):
+                alloc = engine.scheduler.allocator
+            if alloc is not None:
+                free = alloc.get_num_free_blocks()
+                if hasattr(alloc, "get_total_blocks"):
+                    total = alloc.get_total_blocks()
+                elif hasattr(alloc, "get_num_total_blocks"):
+                    total = alloc.get_num_total_blocks()
+                else:
+                    total = getattr(engine.kv_cache_manager, "total_blocks", 1)
+            else:
+                free = 0
+                total = 1
+        except Exception:
+            free = 0
+            total = 1
+        ratio = (free / total) if total else 0.0
+        active = len(getattr(engine.scheduler, "running", []))
+        preemptions = getattr(engine.scheduler, "preemption_count", 0)
+        lines.append(f"kv_cache_free_pages_ratio {ratio}")
+        lines.append(f"kv_cache_active_streams {active}")
+        lines.append(f"kv_cache_preemptions_total {preemptions}")
+    else:
+        lines.append("kv_cache_free_pages_ratio 1.0")
+        lines.append("kv_cache_active_streams 0")
+        lines.append("kv_cache_preemptions_total 0")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n")

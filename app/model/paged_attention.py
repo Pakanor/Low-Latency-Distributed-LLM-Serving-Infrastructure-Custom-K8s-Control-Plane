@@ -1,31 +1,27 @@
+"""Paged attention on top of the paged KV cache.
+
+The model is driven in flat mode: all sequences of a step are concatenated into
+the sequence dimension of a single ``batch_size=1`` tensor, so no padding is
+ever materialised. Attention itself is served by a custom implementation
+registered in ``ALL_ATTENTION_FUNCTIONS``; it receives the freshly projected
+per-layer key/value states, scatters them into the paged blocks and reads the
+whole history back out of the same blocks.
+"""
+
 from typing import List, Optional, Sequence as SequenceABC
 
 import torch
+import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from app.memory.manager import PagedKVCacheManager
-from app.model.attention_backends import AttentionBackend, TorchSdpBackend, select_backend
 from app.scheduler.sequence import Sequence
 
 PAGED_ATTENTION_NAME = "paged"
 
-_FALLBACK_BACKEND = TorchSdpBackend()
-_BACKEND: Optional[AttentionBackend] = None
-
-
-def _backend() -> AttentionBackend:
-    global _BACKEND
-    if _BACKEND is None:
-        _BACKEND = select_backend()
-    return _BACKEND
-
-
-def set_backend(backend: Optional[AttentionBackend]) -> None:
-    global _BACKEND
-    _BACKEND = backend
-
 
 class PagedStepContext:
+    """Slot bookkeeping and attention mask for a single engine step."""
 
     def __init__(
         self,
@@ -69,6 +65,7 @@ class PagedStepContext:
         return int(self.cu_context_offsets[-1])
 
     def position_ids(self, device: torch.device) -> torch.Tensor:
+        """Flat per-token positions, restarting at every sequence boundary."""
         positions = []
         for start, count in zip(self.start_positions, self.new_token_counts):
             positions.append(
@@ -79,6 +76,11 @@ class PagedStepContext:
         return torch.cat(positions).unsqueeze(0)
 
     def attention_mask(self, device: torch.device) -> torch.Tensor:
+        """Block-diagonal causal mask over the concatenated batch.
+
+        Returns a boolean ``(1, 1, num_query_tokens, num_context_tokens)`` mask
+        where ``True`` marks an attended key position.
+        """
         if self._mask is not None and self._mask.device == device:
             return self._mask
 
@@ -110,6 +112,7 @@ def _cumulative_offsets(counts: List[int]) -> torch.Tensor:
 
 
 def _sequence_index(counts: List[int], device: torch.device) -> torch.Tensor:
+    """Map every concatenated token back to the index of its own sequence."""
     if not counts:
         return torch.empty((0,), dtype=torch.long, device=device)
     return torch.repeat_interleave(
@@ -136,16 +139,26 @@ def paged_attention_forward(
     new_values = value.squeeze(0).transpose(0, 1)
     store.scatter_layer_kv(layer_idx, new_keys, new_values, context.scatter_slots)
 
-    scale = scaling if scaling is not None else module.scaling
-    backend = _backend()
-    if not backend.supports(context, query.shape[2]):
-        backend = _FALLBACK_BACKEND
+    context_keys = store.gather_layer_keys(layer_idx, context.gather_slots)
+    context_values = store.gather_layer_values(layer_idx, context.gather_slots)
+    context_keys = context_keys.unsqueeze(0).transpose(1, 2)
+    context_values = context_values.unsqueeze(0).transpose(1, 2)
 
-    attn_output = backend.attend(query, store, layer_idx, context, scale, dropout)
-    return attn_output, None
+    attn_output = F.scaled_dot_product_attention(
+        query,
+        context_keys,
+        context_values,
+        attn_mask=context.attention_mask(query.device),
+        dropout_p=dropout,
+        scale=scaling if scaling is not None else module.scaling,
+        enable_gqa=context_keys.shape[1] != query.shape[1],
+    )
+
+    return attn_output.transpose(1, 2).contiguous(), None
 
 
 def register_paged_attention(model) -> None:
+    """Route every decoder layer of ``model`` through the paged attention."""
     ALL_ATTENTION_FUNCTIONS.register(PAGED_ATTENTION_NAME, paged_attention_forward)
     for layer in _decoder_layers(model):
         layer.self_attn.paged_context = None
@@ -157,6 +170,7 @@ def run_paged_forward(
     context: PagedStepContext,
     input_ids: torch.Tensor,
 ) -> torch.Tensor:
+    """Run one flat forward pass whose KV lands in the paged blocks."""
     decoder = _decoder(model)
     for layer in decoder.layers:
         layer.self_attn.paged_context = context

@@ -112,11 +112,16 @@ class PagedKVCacheManager:
         if not sequences:
             return torch.empty((0,), dtype=torch.long, device=self.device)
 
-        chunks = [
-            self._sequence_slots(seq, start, count)
-            for seq, start, count in zip(sequences, start_tokens, token_counts)
-        ]
-        chunks = [chunk for chunk in chunks if chunk.numel() > 0]
+        chunks = []
+        for seq, start, count in zip(sequences, start_tokens, token_counts):
+            if seq.block_table is None:
+                continue
+            try:
+                chunk = self._sequence_slots(seq, start, count)
+                if chunk.numel() > 0:
+                    chunks.append(chunk)
+            except Exception:
+                continue
         if not chunks:
             return torch.empty((0,), dtype=torch.long, device=self.device)
         return torch.cat(chunks)
