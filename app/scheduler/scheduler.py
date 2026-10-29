@@ -34,6 +34,7 @@ class Scheduler:
             raise ValueError("Scheduler requires a positive block_size")
         self.max_batch_size = max_batch_size
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.preemption_count = 0
 
         self.waiting: List[Sequence] = []
         self.running: List[Sequence] = []
