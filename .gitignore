@@ -64,3 +64,5 @@ ANALYSIS_CONTEXT.md
 *_CONTEXT.md
 __pycache__/
 *.pyc
+*.log
+logs/
