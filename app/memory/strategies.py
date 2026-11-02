@@ -1,6 +1,35 @@
 from abc import ABC, abstractmethod
+import os
 from typing import Tuple, Union
 import torch
+
+
+def resolve_device(device: Union[str, torch.device, None] = None) -> torch.device:
+    requested = device or os.getenv("LLM_DEVICE", "auto")
+    if requested == "auto":
+        requested = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(requested)
+
+
+def resolve_dtype(dtype: Union[str, torch.dtype, None] = None) -> torch.dtype:
+    requested = dtype or os.getenv("LLM_DTYPE", "auto")
+    if isinstance(requested, torch.dtype):
+        return requested
+    requested = requested.lower()
+    if requested == "auto":
+        return torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    aliases = {
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    try:
+        return aliases[requested]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported dtype: {requested}") from exc
 
 
 class KVCacheMemoryStrategy(ABC):

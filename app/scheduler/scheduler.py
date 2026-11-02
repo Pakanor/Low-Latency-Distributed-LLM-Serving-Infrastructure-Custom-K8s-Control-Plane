@@ -106,11 +106,11 @@ class Scheduler:
             seq_len = seq.total_len
             needed_blocks = (seq_len + self.block_size - 1) // self.block_size
             if needed_blocks > self.allocator.get_num_free_blocks():
-                ignored.append(self.waiting.pop(0))
-                continue
+                ignored.append(seq)
+                break
             if current_batch_tokens + seq_len > self.max_num_batched_tokens:
-                ignored.append(self.waiting.pop(0))
-                continue
+                ignored.append(seq)
+                break
 
             self.waiting.pop(0)
             self._allocate_prefix(seq)

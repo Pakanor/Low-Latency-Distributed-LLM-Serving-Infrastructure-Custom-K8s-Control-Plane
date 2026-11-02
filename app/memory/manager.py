@@ -61,7 +61,10 @@ class PagedKVCacheManager:
         else:
             self.strategy = detect_strategy()
 
-        self.allocator = llm_allocator_cpp.PageAllocator(total_blocks, block_size, total_cpu_blocks)
+        bytes_per_token = num_layers * num_heads * head_dim * dtype.itemsize * 2
+        self.allocator = llm_allocator_cpp.PageAllocator(
+            total_blocks, block_size, bytes_per_token, total_cpu_blocks
+        )
         self.swapped_seqs = set()
 
         self.key_cache, self.value_cache = self.strategy.allocate_cache(

@@ -133,12 +133,12 @@ public:
 
         size_t block_size_bytes = tokens_per_block_ * bytes_per_token_;
         size_t total_ram_bytes = total_cpu_blocks_ * block_size_bytes;
-        int ret = posix_memalign(&base_host_ptr_, 4096, total_ram_bytes);
+        int ret = posix_memalign(reinterpret_cast<void**>(&base_host_ptr_), 4096, total_ram_bytes);
         if (ret != 0 || !base_host_ptr_) {
             throw std::bad_alloc();
         }
 
-        uint8_t* byte_ptr = static_cast<uint8_t*>(host_pool_.host_ptr());
+        uint8_t* byte_ptr = base_host_ptr_;
 
         for (size_t i = 0; i < total_blocks_; ++i) {
             free_blocks_.push(static_cast<int>(i));
@@ -332,6 +332,7 @@ private:
     size_t tokens_per_block_;
     size_t bytes_per_token_;
     size_t total_cpu_blocks_;
+    uint8_t* base_host_ptr_{nullptr};
 
     MappedHostBuffer host_pool_;
     std::vector<void*> cpu_block_ptrs_;
