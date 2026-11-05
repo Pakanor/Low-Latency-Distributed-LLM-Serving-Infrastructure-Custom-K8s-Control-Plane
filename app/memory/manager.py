@@ -123,6 +123,8 @@ class PagedKVCacheManager:
                 chunk = self._sequence_slots(seq, start, count)
                 if chunk.numel() > 0:
                     chunks.append(chunk)
+            except ValueError:
+                raise
             except Exception:
                 continue
         if not chunks:
