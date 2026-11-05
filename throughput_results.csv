@@ -1,3 +1,0 @@
-variant,tokens_per_block,total_blocks,max_parallel,output_tokens,elapsed_seconds,tokens_per_second,preemptions
-paged,16,728,50,299,14.701525,20.338,0
-contiguous,2048,5,5,299,36.055141,8.293,0
