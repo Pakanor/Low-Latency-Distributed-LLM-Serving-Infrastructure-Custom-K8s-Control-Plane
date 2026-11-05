@@ -1,3 +1,13 @@
 [build-system]
 requires = ["setuptools>=61.0", "pybind11>=2.10.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast mock-based unit tests",
+    "engine: engine-level tests with MockModelClient",
+    "stress: stress/OOM/preemption tests",
+    "fuzz: property and fuzz tests",
+    "hf: slow tests requiring a HuggingFace model",
+]
