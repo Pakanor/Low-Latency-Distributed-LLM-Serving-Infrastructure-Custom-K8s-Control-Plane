@@ -161,6 +161,44 @@ def test_max_model_len_rejected():
     with pytest.raises(ValueError, match="max_model_len"):
         sch.add_sequence(__import__("app.scheduler.sequence", fromlist=["Sequence"]).Sequence(1, prompt_token_ids=list(range(10)), max_tokens=10))
 
+def test_max_model_len_inclusive_boundary():
+    from app.memory.manager import PagedKVCacheManager
+    from app.scheduler.scheduler import Scheduler
+
+    mgr = PagedKVCacheManager(
+        total_blocks=64, block_size=8, num_heads=2, head_dim=8, device="cpu", num_layers=1
+    )
+    sch = Scheduler(
+        kv_cache_manager=mgr,
+        max_batch_size=4,
+        max_num_batched_tokens=4096,
+        block_size=8,
+        allocator=mgr.get_allocator(),
+        max_model_len=16,
+    )
+    seq = __import__("app.scheduler.sequence", fromlist=["Sequence"]).Sequence(2, prompt_token_ids=list(range(6)), max_tokens=10)
+    sch.add_sequence(seq)
+    assert seq.seq_id == 2
+    with pytest.raises(ValueError, match="max_model_len"):
+        sch.add_sequence(__import__("app.scheduler.sequence", fromlist=["Sequence"]).Sequence(3, prompt_token_ids=list(range(7)), max_tokens=10))
+
+
+@requires_model
+@pytest.mark.hf
+def test_register_paged_attention_two_models_independent():
+    from transformers import AutoModelForCausalLM
+    from app.model.paged_attention import register_paged_attention
+
+    m1 = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-135M-Instruct", dtype=torch.float32)
+    m2 = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-135M-Instruct", dtype=torch.float32)
+    m1.eval(); m2.eval()
+    register_paged_attention(m1)
+    assert m1.config._attn_implementation == "paged"
+    # second model not mutated until registered
+    assert getattr(m2.config, "_attn_implementation", None) != "paged"
+    register_paged_attention(m2)
+    assert m2.config._attn_implementation == "paged"
+
 
 @requires_model
 @pytest.mark.hf
