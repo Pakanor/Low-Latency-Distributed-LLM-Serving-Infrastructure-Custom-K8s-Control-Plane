@@ -8,6 +8,7 @@ lib/
 
 # --- Object files & Compiled Binaries ---
 fragmentation_bench
+thread_safety_test
 *.o
 *.obj
 *.a
@@ -15,6 +16,9 @@ fragmentation_bench
 *.so
 *.so.*
 *.dylib
+
+# --- Generated benchmark outputs ---
+fragmentation_results.csv
 
 # --- Generated Code (gRPC / Protobuf) ---
 *_pb2.py
