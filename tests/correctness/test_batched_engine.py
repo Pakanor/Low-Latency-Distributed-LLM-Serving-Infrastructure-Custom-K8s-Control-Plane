@@ -14,6 +14,8 @@ BLOCK_SIZE = 8
 TOTAL_BLOCKS = 256
 MAX_TOKENS = 10
 
+pytestmark = pytest.mark.hf
+
 PROMPTS = [
     "The capital of France is",
     "Once upon a time in a forest",
@@ -117,7 +119,3 @@ def test_sequences_do_not_leak_into_each_other(model_and_tokenizer):
 
     target = next(seq for seq in together if seq.prompt_token_ids == tokens)
     assert target.output_token_ids == alone.output_token_ids
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

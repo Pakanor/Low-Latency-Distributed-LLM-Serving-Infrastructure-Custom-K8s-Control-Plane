@@ -36,7 +36,3 @@ def test_resolve_dtype_auto_is_float32_without_gpu():
     if torch.cuda.is_available():
         pytest.skip("GPU present: auto dtype is a hardware dtype")
     assert resolve_dtype("auto") == torch.float32
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

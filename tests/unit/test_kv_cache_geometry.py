@@ -53,7 +53,3 @@ def test_from_model_config_falls_back_to_attention_heads():
     )
 
     assert manager.num_heads == 9
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

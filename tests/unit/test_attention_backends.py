@@ -326,7 +326,3 @@ def test_gqa_reference_backend_matches_manual_sdpa(store):
     manual_output = manual_output.transpose(1, 2).contiguous()
 
     assert torch.allclose(output, manual_output, atol=1e-6)
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

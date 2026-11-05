@@ -1,9 +1,10 @@
 import pytest
-import torch
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.scheduler import Scheduler
 from app.engine.llm_engine import LLMEngine
 from app.model.client import MockModelClient
+
+pytestmark = pytest.mark.stress
 
 
 def test_ragged_batch_block_table_structure():

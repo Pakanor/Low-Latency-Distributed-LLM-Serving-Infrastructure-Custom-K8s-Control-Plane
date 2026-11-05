@@ -13,6 +13,8 @@ from app.scheduler.sequence import Sequence
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+pytestmark = pytest.mark.hf
+
 MODEL_NAME = "HuggingFaceTB/SmolLM-135M-Instruct"
 NUM_LAYERS = 30
 NUM_KV_HEADS = 3
@@ -113,7 +115,3 @@ def test_paged_cache_holds_history_for_every_layer(model_and_tokenizer):
         assert layer_keys.shape == (len(prompt_ids), NUM_KV_HEADS, HEAD_DIM)
         assert torch.isfinite(layer_keys).all()
         assert layer_keys.abs().sum() > 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

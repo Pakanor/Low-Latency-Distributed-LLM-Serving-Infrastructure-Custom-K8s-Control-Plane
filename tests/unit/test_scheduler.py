@@ -33,8 +33,3 @@ def test_scheduler_prefill_and_decode_limits():
     outputs_decode = scheduler.schedule()
     assert len(outputs_decode.scheduled_prefills) == 0
     assert len(outputs_decode.scheduled_decodes) == 2
-
-
-if __name__ == "__main__":
-    test_scheduler_prefill_and_decode_limits()
-    print("test_scheduler.py PASSED")

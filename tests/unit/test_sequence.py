@@ -16,8 +16,3 @@ def test_sequence_lifecycle():
     seq.append_token(202)
     assert seq.total_len == 5
     assert seq.status == SequenceStatus.FINISHED
-
-
-if __name__ == "__main__":
-    test_sequence_lifecycle()
-    print("test_sequence.py PASSED")

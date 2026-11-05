@@ -1,5 +1,6 @@
 import pytest
 import torch
+import llm_allocator_cpp
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.sequence import Sequence
 
@@ -7,13 +8,107 @@ from app.scheduler.sequence import Sequence
 @pytest.fixture
 def kv_manager():
     return PagedKVCacheManager(
-        total_blocks=16,
+        total_blocks=10,
         block_size=4,
         num_heads=2,
         head_dim=8,
         device="cpu",
-        num_layers=2,
+        num_layers=1,
     )
+
+
+def test_allocate_and_write_prefix(kv_manager):
+    seq = Sequence(seq_id=1, prompt_token_ids=[10, 20, 30, 40, 50])
+    kv_manager.allocate_prefix_blocks(seq)
+
+    assert seq.block_table is not None
+    assert seq.block_table.get_tokens_count() == 5
+    assert len(seq.block_table.get_physical_blocks()) == 2
+
+    keys = torch.randn(1, 5, 2, 8)
+    values = torch.randn(1, 5, 2, 8)
+
+    slot_mapping = kv_manager.write_prefix_kv(seq, keys, values)
+    assert len(slot_mapping) == 5
+
+
+def test_single_token_kv_write(kv_manager):
+    seq = Sequence(seq_id=2, prompt_token_ids=[10, 20, 30, 40])
+    kv_manager.allocate_prefix_blocks(seq)
+
+    seq.append_token(50)
+    kv_manager.allocate_slot_for_next_token(seq)
+
+    key_token = torch.randn(1, 2, 8)
+    value_token = torch.randn(1, 2, 8)
+
+    kv_manager.write_single_token_kv(seq, key_token, value_token)
+    assert seq.block_table.get_tokens_count() == 5
+    assert len(seq.block_table.get_physical_blocks()) == 2
+
+
+def test_free_sequence(kv_manager):
+    allocator = kv_manager.get_allocator()
+    initial_free = allocator.get_num_free_blocks()
+
+    seq = Sequence(seq_id=3, prompt_token_ids=[1, 2, 3, 4])
+    kv_manager.allocate_prefix_blocks(seq)
+    assert allocator.get_num_free_blocks() == initial_free - 1
+
+    kv_manager.free_sequence(seq)
+    assert allocator.get_num_free_blocks() == initial_free
+    assert seq.block_table is None
+
+
+def test_gather_kv_cache_round_trip():
+    manager = PagedKVCacheManager(
+        total_blocks=10,
+        block_size=4,
+        num_heads=2,
+        head_dim=8,
+        device="cpu",
+        num_layers=1,
+    )
+    seq = Sequence(seq_id=1, prompt_token_ids=[10, 20, 30, 40])
+    manager.allocate_prefix_blocks(seq)
+
+    keys = torch.randn(1, 4, 2, 8)
+    values = torch.randn(1, 4, 2, 8)
+    manager.write_prefix_kv(seq, keys, values)
+
+    gathered = manager.gather_kv_cache(seq, read_len=4)
+    assert gathered is not None
+    assert len(gathered) == 1
+
+    gathered_key, gathered_value = gathered[0]
+    assert gathered_key.shape == (1, 2, 4, 8)
+    assert gathered_value.shape == (1, 2, 4, 8)
+
+    original_key = keys[0].unsqueeze(0).transpose(1, 2)
+    original_value = values[0].unsqueeze(0).transpose(1, 2)
+    assert torch.allclose(gathered_key, original_key)
+    assert torch.allclose(gathered_value, original_value)
+
+
+def test_block_size_is_tokens_not_bytes():
+    num_heads = 2
+    head_dim = 8
+    dtype = torch.float32
+    bytes_per_token = num_heads * head_dim * dtype.itemsize * 2
+    tokens_per_block = 4
+    total_cpu_blocks = 32
+
+    allocator = llm_allocator_cpp.PageAllocator(
+        total_blocks=10,
+        tokens_per_block=tokens_per_block,
+        bytes_per_token=bytes_per_token,
+        total_cpu_blocks=total_cpu_blocks,
+    )
+
+    assert allocator.get_block_size() == tokens_per_block
+    assert allocator.get_bytes_per_token() == bytes_per_token
+    expected_pool_bytes = total_cpu_blocks * tokens_per_block * bytes_per_token
+    assert allocator.get_host_pool_bytes() == expected_pool_bytes
 
 
 def _make_sequence(manager, seq_id, prompt_len):
@@ -60,8 +155,8 @@ def test_scatter_kv_writes_flat_ragged_batch(kv_manager):
     second = _make_sequence(kv_manager, seq_id=2, prompt_len=2)
 
     slot_mapping = kv_manager.build_slot_mapping([first, second], [0, 0], [3, 2])
-    keys = torch.randn(5, 2, 2, 8)
-    values = torch.randn(5, 2, 2, 8)
+    keys = torch.randn(5, 1, 2, 8)
+    values = torch.randn(5, 1, 2, 8)
 
     kv_manager.scatter_kv(keys, values, slot_mapping)
 
@@ -79,11 +174,11 @@ def test_scatter_kv_does_not_touch_other_sequences(kv_manager):
     first = _make_sequence(kv_manager, seq_id=1, prompt_len=4)
     second = _make_sequence(kv_manager, seq_id=2, prompt_len=4)
 
-    first_keys = torch.randn(4, 2, 2, 8)
+    first_keys = torch.randn(4, 1, 2, 8)
     kv_manager.scatter_kv(
         first_keys, first_keys.clone(), kv_manager.build_slot_mapping([first], [0], [4])
     )
-    second_keys = torch.randn(4, 2, 2, 8)
+    second_keys = torch.randn(4, 1, 2, 8)
     kv_manager.scatter_kv(
         second_keys, second_keys.clone(), kv_manager.build_slot_mapping([second], [0], [4])
     )
@@ -113,7 +208,3 @@ def test_build_slot_mapping_rejects_mismatched_lengths(kv_manager):
 
     with pytest.raises(ValueError):
         kv_manager.build_slot_mapping([seq], [0, 1], [4])
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

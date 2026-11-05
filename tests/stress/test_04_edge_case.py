@@ -5,6 +5,8 @@ from app.engine.llm_engine import LLMEngine
 from app.model.client import MockModelClient
 from app.scheduler.sequence import SequenceStatus
 
+pytestmark = pytest.mark.stress
+
 
 def test_immediate_finish_max_tokens_one():
 

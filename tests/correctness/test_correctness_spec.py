@@ -68,6 +68,7 @@ def _run_engine(model, prompt_ids, max_tokens, block_size, total_blocks, batch=8
 
 
 @requires_model
+@pytest.mark.hf
 def test_output_equivalence_paged_contiguous_hf(model_tok):
     """Paged vs contiguous-style (large block) vs HF generate, greedy.
 
@@ -94,6 +95,7 @@ def test_output_equivalence_paged_contiguous_hf(model_tok):
 
 
 @requires_model
+@pytest.mark.hf
 @pytest.mark.parametrize("block_size", [1, 4, 16, 32, 64])
 def test_block_size_equivalence(model_tok, block_size):
     """Compute HF ref before engine registers paged attention on model."""
@@ -111,6 +113,7 @@ def test_block_size_equivalence(model_tok, block_size):
 
 
 @requires_model
+@pytest.mark.hf
 def test_edge_cases_boundaries(model_tok):
     """Edge cases; refs computed before engine mutates model attention.
 
@@ -160,6 +163,7 @@ def test_max_model_len_rejected():
 
 
 @requires_model
+@pytest.mark.hf
 def test_no_leaks_after_engine_run(model_tok):
     model, tok = model_tok
     ids = tok("Hello").input_ids
@@ -190,6 +194,7 @@ def test_sequence_isolation_distinct_kv():
 
 
 @requires_model
+@pytest.mark.hf
 def test_preemption_preserves_output_equivalence(model_tok):
     model, tok = model_tok
     ids1 = tok("The capital of France is").input_ids
@@ -216,6 +221,7 @@ def test_preemption_preserves_output_equivalence(model_tok):
     assert b.is_finished()
 
 
+@pytest.mark.hf
 def test_generate_after_register_paged_attention_fails_clearly():
     """register_paged_attention mutates model globally; HF generate must not silently corrupt.
 
