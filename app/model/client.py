@@ -60,22 +60,30 @@ class MockModelClient:
         seq_id: int,
         input_ids: List[int],
         past_key_values: Optional[Tuple] = None,
+        is_prefill: bool = False,
     ) -> dict:
-        seq_len = self._seq_len_cache.get(seq_id, 0) + len(input_ids)
-        self._seq_len_cache[seq_id] = seq_len
-
-        if past_key_values is None:
+        has_prefill = past_key_values is None or is_prefill
+        if has_prefill:
+            seq_len = len(input_ids)
             past_kv = []
             for _ in range(self.num_layers):
                 key = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
                 value = torch.zeros(1, self.num_heads, seq_len, self.head_dim)
                 past_kv.append((key, value))
         else:
+            seq_len = self._seq_len_cache.get(seq_id, 0) + len(input_ids)
             past_kv = []
             for layer in past_key_values:
-                key = torch.cat([layer[0], torch.zeros(1, self.num_heads, 1, self.head_dim)], dim=2)
-                value = torch.cat([layer[1], torch.zeros(1, self.num_heads, 1, self.head_dim)], dim=2)
+                key = torch.cat([
+                    layer[0],
+                    torch.zeros(1, self.num_heads, len(input_ids), self.head_dim),
+                ], dim=2)
+                value = torch.cat([
+                    layer[1],
+                    torch.zeros(1, self.num_heads, len(input_ids), self.head_dim),
+                ], dim=2)
                 past_kv.append((key, value))
+        self._seq_len_cache[seq_id] = seq_len
 
         next_token_id = 100 + seq_len
         is_eos = next_token_id == self.eos_token_id
