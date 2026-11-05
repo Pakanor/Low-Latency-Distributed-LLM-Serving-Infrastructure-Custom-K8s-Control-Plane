@@ -20,6 +20,7 @@ class Scheduler:
         page_allocator=None,
         block_size: Optional[int] = None,
         allocator=None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         self.kv_cache_manager = kv_cache_manager
         self.allocator = (
@@ -34,6 +35,7 @@ class Scheduler:
             raise ValueError("Scheduler requires a positive block_size")
         self.max_batch_size = max_batch_size
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_model_len = max_model_len
         self.preemption_count = 0
 
         self.waiting: List[Sequence] = []
@@ -41,6 +43,11 @@ class Scheduler:
         self.swapped: List[Sequence] = []
 
     def add_sequence(self, seq: Sequence) -> None:
+        if self.max_model_len is not None and seq.total_len + seq.max_tokens > self.max_model_len:
+            raise ValueError(
+                f"Sequence {seq.seq_id} exceeds max_model_len: "
+                f"prompt+max_tokens ({seq.total_len + seq.max_tokens}) > {self.max_model_len}"
+            )
         self.waiting.append(seq)
 
     def has_unfinished_sequences(self) -> bool:
