@@ -19,6 +19,20 @@ from app.scheduler.sequence import Sequence
 
 PAGED_ATTENTION_NAME = "paged"
 
+# Optional pluggable backend (set by tests or via select_backend wiring).
+# None => use the inline reference SDPA path (always correct).
+_BACKEND = None
+_FALLBACK_BACKEND = None
+
+
+def _get_fallback_backend():
+    global _FALLBACK_BACKEND
+    if _FALLBACK_BACKEND is None:
+        from app.model.attention_backends import TorchSdpBackend
+
+        _FALLBACK_BACKEND = TorchSdpBackend()
+    return _FALLBACK_BACKEND
+
 
 class PagedStepContext:
     """Slot bookkeeping and attention mask for a single engine step."""
@@ -139,6 +153,15 @@ def paged_attention_forward(
     new_values = value.squeeze(0).transpose(0, 1)
     store.scatter_layer_kv(layer_idx, new_keys, new_values, context.scatter_slots)
 
+    scale = scaling if scaling is not None else module.scaling
+    backend = _BACKEND
+    if backend is not None and backend.supports(context, query.shape[2]):
+        return backend.attend(query, store, layer_idx, context, scale, dropout), None
+    if backend is not None and not backend.supports(context, query.shape[2]):
+        # Fallback preserves correctness for unsupported shapes (e.g. prefill on
+        # a decode-only native backend).
+        return _get_fallback_backend().attend(query, store, layer_idx, context, scale, dropout), None
+
     context_keys = store.gather_layer_keys(layer_idx, context.gather_slots)
     context_values = store.gather_layer_values(layer_idx, context.gather_slots)
     context_keys = context_keys.unsqueeze(0).transpose(1, 2)
@@ -150,7 +173,7 @@ def paged_attention_forward(
         context_values,
         attn_mask=context.attention_mask(query.device),
         dropout_p=dropout,
-        scale=scaling if scaling is not None else module.scaling,
+        scale=scale,
         enable_gqa=context_keys.shape[1] != query.shape[1],
     )
 
