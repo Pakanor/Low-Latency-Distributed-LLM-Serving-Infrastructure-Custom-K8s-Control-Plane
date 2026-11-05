@@ -222,61 +222,67 @@ def test_allocator_fuzz_invariants():
     from app.memory.manager import PagedKVCacheManager
     from app.scheduler.sequence import Sequence
 
-    rng = random.Random(12345)
-    total_blocks = 24
-    block_size = 4
-    mgr = PagedKVCacheManager(
-        total_blocks=total_blocks, block_size=block_size, num_heads=1, head_dim=4,
-        device="cpu", num_layers=1,
-    )
-    alloc = mgr.get_allocator()
-    live = {}  # seq_id -> (Sequence, allocated_token_slots)
+    def run_one(seed):
+        rng = random.Random(seed)
+        total_blocks = 24
+        block_size = 4
+        mgr = PagedKVCacheManager(
+            total_blocks=total_blocks, block_size=block_size, num_heads=1, head_dim=4,
+            device="cpu", num_layers=1,
+        )
+        alloc = mgr.get_allocator()
+        live = {}
 
-    def check():
-        free = alloc.get_num_free_blocks()
-        used_blocks = set()
-        cap = 0
-        for _sid, (seq, _n) in live.items():
-            assert seq.block_table is not None
-            phys = list(seq.block_table.get_physical_blocks())
-            for b in phys:
-                assert b not in used_blocks, f"block {b} owned twice"
-                used_blocks.add(b)
-            assert seq.block_table.get_tokens_count() <= len(phys) * block_size
-            cap += len(phys) * block_size
-        assert free + len(used_blocks) == total_blocks
-        assert sum(n for _, n in live.values()) <= cap
+        def check():
+            free = alloc.get_num_free_blocks()
+            used_blocks = set()
+            cap = 0
+            for _sid, (seq, _n) in live.items():
+                assert seq.block_table is not None
+                phys = list(seq.block_table.get_physical_blocks())
+                for b in phys:
+                    assert b not in used_blocks, f"block {b} owned twice (seed={seed})"
+                    used_blocks.add(b)
+                assert seq.block_table.get_tokens_count() <= len(phys) * block_size
+                cap += len(phys) * block_size
+            assert free + len(used_blocks) == total_blocks
+            assert sum(n for _, n in live.values()) <= cap
 
-    for i in range(400):
-        op = rng.choice(["add", "append", "free", "add", "append"])
-        check()
-        if op == "add" and len(live) < 6 and alloc.get_num_free_blocks() > 0:
-            plen = rng.randint(1, 10)
-            s = Sequence(1000 + i, prompt_token_ids=list(range(plen)))
-            try:
-                mgr.allocate_prefix_blocks(s)
-                live[s.seq_id] = (s, plen)
-            except Exception:
-                # OOM is acceptable; state must remain consistent
-                if s.block_table is not None:
-                    mgr.free_sequence(s)
-        elif op == "append" and live:
-            sid = rng.choice(list(live))
-            s, n = live[sid]
-            try:
-                mgr.allocate_slot_for_next_token(s)
-                live[sid] = (s, n + 1)
-            except Exception:
-                pass
-        elif op == "free" and live:
-            sid = rng.choice(list(live))
-            s, _n = live.pop(sid)
+        for i in range(1000):
+            op = rng.choice(["add", "append", "free", "add", "append"])
+            check()
+            if op == "add" and len(live) < 6 and alloc.get_num_free_blocks() > 0:
+                plen = rng.randint(1, 10)
+                s = Sequence(1000 + i, prompt_token_ids=list(range(plen)))
+                try:
+                    mgr.allocate_prefix_blocks(s)
+                    live[s.seq_id] = (s, plen)
+                except Exception:
+                    if s.block_table is not None:
+                        mgr.free_sequence(s)
+            elif op == "append" and live:
+                sid = rng.choice(list(live))
+                s, n = live[sid]
+                try:
+                    mgr.allocate_slot_for_next_token(s)
+                    live[sid] = (s, n + 1)
+                except Exception:
+                    pass
+            elif op == "free" and live:
+                sid = rng.choice(list(live))
+                s, _n = live.pop(sid)
+                mgr.free_sequence(s)
+        for s, _n in list(live.values()):
             mgr.free_sequence(s)
-    for s, _n in list(live.values()):
-        mgr.free_sequence(s)
-    live.clear()
-    check()
-    assert alloc.get_num_free_blocks() == total_blocks
+        live.clear()
+        check()
+        assert alloc.get_num_free_blocks() == total_blocks
+
+    for seed in range(100):
+        try:
+            run_one(10000 + seed)
+        except AssertionError as e:
+            raise AssertionError(f"fuzz failed seed={10000+seed}: {e}") from e
 
 
 def test_generate_after_register_paged_attention_fails_clearly():
