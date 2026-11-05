@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
+#include <ostream>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -312,6 +313,39 @@ public:
     }
 
     size_t get_total_blocks() const { return total_blocks_; }
+
+    void dump_state(std::ostream& os) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        os << "total_blocks=" << total_blocks_
+           << " free_blocks=" << free_blocks_.size()
+           << " cpu_free=" << cpu_free_blocks_.size()
+           << " cpu_total=" << total_cpu_blocks_
+           << " swapped=" << gpu_to_cpu_map_.size()
+           << " ref_counts>0={";
+        bool first = true;
+        for (size_t i = 0; i < blocks_.size(); ++i) {
+            if (blocks_[i].ref_count > 0) {
+                if (!first) os << ",";
+                os << i << ":" << blocks_[i].ref_count;
+                first = false;
+            }
+        }
+        os << "}";
+    }
+
+    bool is_zero_copy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return host_pool_.is_mapped();
+    }
+
+    uintptr_t get_device_ptr(int gpu_block_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        if (host_pool_.is_mapped()) {
+            return host_pool_.device_ptr();
+        }
+        return 0;
+    }
 
     double get_utilization_percentage() const {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -94,12 +94,23 @@ def _build_extension():
 
     print("[llm_allocator_cpp] CPU-only build (LLM_INFRA_HIP_ENABLED=0)")
     print("[llm_allocator_cpp] Native paged-attention CPU kernel: csrc/src/paged_kernels.cpp")
+
+    extra_compile = ["-O3", "-std=c++17", "-fopenmp"]
+    extra_link = ["-fopenmp"]
+
+    sanitizer = os.getenv("LLM_ALLOCATOR_SANITIZE", "").strip()
+    if sanitizer:
+        extra_compile.extend(sanitizer.split())
+        extra_link.extend(sanitizer.split())
+        print(f"[llm_allocator_cpp] Sanitizer flags enabled: {sanitizer}")
+
     return Pybind11Extension(
         "llm_allocator_cpp",
         ["csrc/src/bindings.cpp", "csrc/src/paged_kernels.cpp"],
         include_dirs=["csrc/include"],
         define_macros=[("LLM_INFRA_HIP_ENABLED", "0")],
-        extra_compile_args=["-O3", "-std=c++17", "-fopenmp"],
+        extra_compile_args=extra_compile,
+        extra_link_args=extra_link,
     )
 
 
