@@ -7,8 +7,11 @@ preemption equivalence under pressure.
 """
 import os
 import random
+import gc
+from collections import deque
 
 import pytest
+import psutil
 import torch
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -236,6 +239,7 @@ def test_allocator_fuzz_scaled_invariants():
         )
         alloc = mgr.get_allocator()
         live = {}
+        recent_ops = deque(maxlen=20)
 
         def check():
             check_allocator_invariants(
@@ -247,6 +251,7 @@ def test_allocator_fuzz_scaled_invariants():
 
         for i in range(1000):
             op = rng.choice(["add", "append", "free", "add", "append"])
+            recent_ops.append(op)
             check()
             if op == "add" and len(live) < 6 and alloc.get_num_free_blocks() > 0:
                 plen = rng.randint(1, 10)
@@ -269,23 +274,53 @@ def test_allocator_fuzz_scaled_invariants():
                 sid = rng.choice(list(live))
                 s, _n = live.pop(sid)
                 mgr.free_sequence(s)
-        for s, _n in list(live.values()):
-            mgr.free_sequence(s)
-        live.clear()
-        check()
-        assert alloc.get_num_free_blocks() == total_blocks
+        try:
+            for s, _n in list(live.values()):
+                mgr.free_sequence(s)
+            live.clear()
+            check()
+            assert alloc.get_num_free_blocks() == total_blocks
+        except AssertionError as e:
+            raise AssertionError(f"seed={seed}, recent_ops={list(recent_ops)}: {e}") from e
+        finally:
+            del live, alloc, mgr
+            gc.collect()
 
+    process = psutil.Process()
+    first_rss = None
     for seed in range(100):
         try:
             run_one(20000 + seed)
         except AssertionError as e:
             raise AssertionError(f"scaled fuzz failed seed={20000+seed}: {e}") from e
+        rss = process.memory_info().rss
+        if first_rss is None:
+            first_rss = rss
+    assert first_rss is not None
+    assert rss <= first_rss + 300 * 1024 * 1024
 
 
 def _baseline_tokens(model, prompt_ids, max_tokens):
     return model.generate(
         torch.tensor([prompt_ids]), max_new_tokens=max_tokens, do_sample=False
     )[0, -max_tokens:].tolist()
+
+
+def _tiny_gqa_model(vocab_size):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=vocab_size,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(config)
+    model.eval()
+    return model
 
 
 def _run_engine(model, prompt_specs, total_blocks, block_size, max_model_len=2048):
@@ -312,13 +347,44 @@ def _run_engine(model, prompt_specs, total_blocks, block_size, max_model_len=204
     )
     eng = LLMEngine(kv_cache_manager=mgr, scheduler=sch, model=model)
     seqs = [eng.add_request(ids, max_tokens=n) for ids, n in prompt_specs]
-    for _ in range(8000):
+    max_steps = 20 * sum(len(ids) + n for ids, n in prompt_specs)
+    for _ in range(max_steps):
         if not eng.has_unfinished_requests():
             break
         eng.step()
+    else:
+        raise AssertionError(
+            f"engine did not finish within {max_steps} steps; livelock? "
+            f"total_blocks={total_blocks}, block_size={block_size}"
+        )
     return seqs, mgr, sch
 
 
+def test_scheduler_rejects_request_larger_than_pool():
+    from app.memory.manager import PagedKVCacheManager
+    from app.scheduler.scheduler import Scheduler
+    from app.scheduler.sequence import Sequence
+
+    mgr = PagedKVCacheManager(
+        total_blocks=3,
+        block_size=4,
+        num_heads=1,
+        head_dim=4,
+        device="cpu",
+        num_layers=1,
+    )
+    scheduler = Scheduler(
+        kv_cache_manager=mgr,
+        block_size=4,
+        allocator=mgr.get_allocator(),
+        max_model_len=128,
+    )
+
+    with pytest.raises(ValueError, match="requires 4 blocks.*only 3 blocks"):
+        scheduler.add_sequence(Sequence(1, prompt_token_ids=list(range(5)), max_tokens=10))
+
+
+@pytest.mark.hf
 @requires_model
 def test_scheduler_preemption_hf_equivalence():
     """HF preemption equivalence: multiple pool/block configs, repeated preemption,
@@ -361,10 +427,19 @@ def test_scheduler_preemption_hf_equivalence():
             n = rng.randint(4, 8)
             specs.append((p, n))
         rng_specs.append((seed, specs))
-        rng_bases.append([_baseline_tokens(model, p, n) for p, n in specs])
+
+    # Keep the cached SmolLM comparison above and use a tiny random GQA model
+    # for the 100-seed-style randomized pressure loop below.
+    fuzz_model = _tiny_gqa_model(tok.vocab_size)
+    rng_bases = [
+        [_baseline_tokens(fuzz_model, p, n) for p, n in specs]
+        for _seed, specs in rng_specs
+    ]
 
     # (1) parameterized pool/block configs
-    for total_blocks, block_size in [(3, 4), (4, 4), (6, 8)]:
+    # Each request needs 4/3 blocks for block_size=4, or 2/2 for block_size=8.
+    # Every pool fits either request alone but not both, forcing preemption.
+    for total_blocks, block_size in [(4, 4), (5, 4), (3, 8)]:
         seqs, mgr, sch = _run_engine(
             model, [(ids1, 10), (ids2, 8)], total_blocks, block_size
         )
@@ -372,47 +447,66 @@ def test_scheduler_preemption_hf_equivalence():
         assert seqs[0].output_token_ids == bases[("p1", 10)]
         assert seqs[1].output_token_ids == bases[("p2", 8)]
         assert mgr.get_allocator().get_num_free_blocks() == total_blocks
+        del seqs, sch, mgr
+        gc.collect()
 
     # (2) repeated preemption of same sequences under extreme pressure
     mgr = PagedKVCacheManager.from_model_config(
-        model.config, total_blocks=2, block_size=4, dtype=torch.float32,
+        model.config, total_blocks=10, block_size=2, dtype=torch.float32,
         device="cpu", total_cpu_blocks=1,
     )
     sch = Scheduler(
         kv_cache_manager=mgr, max_batch_size=2, max_num_batched_tokens=128,
-        block_size=4, allocator=mgr.get_allocator(), max_model_len=2048,
+        block_size=2, allocator=mgr.get_allocator(), max_model_len=2048,
     )
     eng = LLMEngine(kv_cache_manager=mgr, scheduler=sch, model=model)
     a = eng.add_request(ids1, max_tokens=14)
     b = eng.add_request(ids_b, max_tokens=10)
+    c = eng.add_request(ids2, max_tokens=8)
+    d = eng.add_request(ids2, max_tokens=8)
+    e = eng.add_request(ids2, max_tokens=8)
+    f = eng.add_request(ids2, max_tokens=8)
     for _ in range(12000):
         if not eng.has_unfinished_requests():
             break
         eng.step()
         free = mgr.get_allocator().get_num_free_blocks()
         used = set()
-        for sq in (a, b):
+        for sq in (a, b, c, d, e, f):
             if sq.block_table is None:
                 continue
             phys = list(sq.block_table.get_physical_blocks())
             assert not (used & set(phys))
             used.update(phys)
-            assert sq.block_table.get_tokens_count() <= len(phys) * 4
-        assert free + len(used) == 2
+            assert sq.block_table.get_tokens_count() <= len(phys) * 2
+        assert free + len(used) == 10
     assert a.is_finished() and b.is_finished()
+    assert c.is_finished() and d.is_finished() and e.is_finished() and f.is_finished()
     assert sch.preemption_count >= 1
     assert max(sch.preemption_counts.values()) >= 2
     assert a.output_token_ids == bases[("p1", 14)]
     assert b.output_token_ids == bases[("pb", 10)]
-    assert mgr.get_allocator().get_num_free_blocks() == 2
+    assert c.output_token_ids == bases[("p2", 8)]
+    assert d.output_token_ids == bases[("p2", 8)]
+    assert e.output_token_ids == bases[("p2", 8)]
+    assert f.output_token_ids == bases[("p2", 8)]
+    assert mgr.get_allocator().get_num_free_blocks() == 10
+    del a, b, c, d, e, f, eng, sch, mgr
+    gc.collect()
 
     # (3) random lengths/seeds under pressure
     for (seed, specs), blist in zip(rng_specs, rng_bases):
-        seqs, mgr, sch = _run_engine(model, specs, total_blocks=5, block_size=4)
-        for s, base, (p, n) in zip(seqs, blist, specs):
-            assert s.is_finished(), f"seed={seed} unfinished prompt_len={len(p)} n={n}"
-            assert s.output_token_ids == base, f"seed={seed} mismatch"
-        assert mgr.get_allocator().get_num_free_blocks() == 5
+        seqs, mgr, sch = _run_engine(fuzz_model, specs, total_blocks=5, block_size=4)
+        try:
+            for s, base, (p, n) in zip(seqs, blist, specs):
+                assert s.is_finished(), f"seed={seed} unfinished prompt_len={len(p)} n={n}"
+                assert s.output_token_ids == base, f"seed={seed} mismatch"
+            assert mgr.get_allocator().get_num_free_blocks() == 5
+        finally:
+            del seqs, sch, mgr
+            gc.collect()
+    del fuzz_model
+    gc.collect()
 
 
 def test_scheduler_fuzz_scaled_invariants():
@@ -438,6 +532,7 @@ def test_scheduler_fuzz_scaled_invariants():
         eng = LLMEngine(kv_cache_manager=mgr, scheduler=sch, model_client=MockModelClient(num_layers=1, num_heads=1, head_dim=4))
         seqs = []
         next_id = 1
+        recent_ops = deque(maxlen=20)
 
         def check():
             check_allocator_invariants(
@@ -449,6 +544,7 @@ def test_scheduler_fuzz_scaled_invariants():
 
         for _ in range(200):
             op = rng.choice(["add", "step", "step", "add", "step"])
+            recent_ops.append(op)
             check()
             if op == "add" and len([s for s in seqs if not s.is_finished()]) < 5:
                 plen = rng.randint(1, 8)
@@ -467,13 +563,26 @@ def test_scheduler_fuzz_scaled_invariants():
             check()
         check()
         # sequences may be waiting if pool too small for prompt — drain by freeing
-        for s in seqs:
-            if not s.is_finished() and s.block_table is not None:
-                sch.free_sequence(s)
-        assert mgr.get_allocator().get_num_free_blocks() == total_blocks
+        try:
+            for s in seqs:
+                if not s.is_finished() and s.block_table is not None:
+                    sch.free_sequence(s)
+            assert mgr.get_allocator().get_num_free_blocks() == total_blocks
+        except AssertionError as e:
+            raise AssertionError(f"seed={seed}, recent_ops={list(recent_ops)}: {e}") from e
+        finally:
+            del seqs, eng, sch, mgr
+            gc.collect()
 
+    process = psutil.Process()
+    first_rss = None
     for seed in range(100):
         try:
             run_one(40000 + seed)
         except AssertionError as e:
             raise AssertionError(f"scheduler fuzz failed seed={40000+seed}: {e}") from e
+        rss = process.memory_info().rss
+        if first_rss is None:
+            first_rss = rss
+    assert first_rss is not None
+    assert rss <= first_rss + 300 * 1024 * 1024

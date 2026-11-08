@@ -127,7 +127,7 @@ class LLMEngine:
     ) -> Tuple[List[List[int]], List[int]]:
         """Tokens each sequence contributes to this step, and where they land."""
         if is_prefill:
-            token_lists = [seq.prompt_token_ids for seq in sequences]
+            token_lists = [seq.get_token_ids() for seq in sequences]
             start_positions = [0] * len(sequences)
         else:
             token_lists = [self._last_decode_token(seq) for seq in sequences]
@@ -172,7 +172,8 @@ class LLMEngine:
             start_positions,
             new_token_counts,
         )
-        logits = run_paged_forward(self.model, context, flat_input)
+        with torch.inference_mode():
+            logits = run_paged_forward(self.model, context, flat_input)
 
         cu_seqlens = context.cu_seqlens
         return [

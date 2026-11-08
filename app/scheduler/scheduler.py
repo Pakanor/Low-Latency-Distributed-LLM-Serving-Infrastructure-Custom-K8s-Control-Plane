@@ -52,6 +52,16 @@ class Scheduler:
                 f"Sequence {seq.seq_id} exceeds max_model_len: "
                 f"prompt+max_tokens ({seq.total_len + seq.max_tokens}) > {self.max_model_len}"
             )
+        total_blocks = self.allocator.get_total_blocks()
+        required_blocks = (
+            seq.total_len + seq.max_tokens + self.block_size - 1
+        ) // self.block_size
+        if required_blocks > total_blocks:
+            raise ValueError(
+                f"Sequence {seq.seq_id} requires {required_blocks} blocks for "
+                f"prompt+max_tokens ({seq.total_len + seq.max_tokens}) but the "
+                f"KV cache pool has only {total_blocks} blocks"
+            )
         self.waiting.append(seq)
 
     def has_unfinished_sequences(self) -> bool:
@@ -98,7 +108,6 @@ class Scheduler:
             if needs_new_block and self.allocator.get_num_free_blocks() < 1:
                 seq.status = SequenceStatus.WAITING
                 self._free_blocks(seq)
-                seq.output_token_ids.clear()
                 self.preemption_count += 1
                 self.preemption_counts[seq.seq_id] = (
                     self.preemption_counts.get(seq.seq_id, 0) + 1
