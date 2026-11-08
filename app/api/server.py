@@ -11,13 +11,14 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sse_starlette.sse import EventSourceResponse
 
+from app.config import DEFAULT_CONFIG, RuntimeConfig, configure_runtime
 from app.engine.llm_engine import LLMEngine
 from app.memory.strategies import resolve_device, resolve_dtype
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("MODEL_NAME", "HuggingFaceTB/SmolLM-135M-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_CONFIG.model_name)
 
 model = None
 tokenizer = None
@@ -26,15 +27,16 @@ kv_cache_store: Dict[int, Any] = {}
 _step_task: Optional[asyncio.Task] = None
 
 
-def load_model() -> bool:
+def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
     global model, tokenizer, model_device
     try:
-        device = resolve_device()
-        dtype = resolve_dtype()
-        logger.info(f"Loading model: {MODEL_NAME} on {device} ({dtype})...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        configure_runtime(config)
+        device = resolve_device(config.device)
+        dtype = resolve_dtype(config.dtype)
+        logger.info(f"Loading model: {config.model_name} on {device} ({dtype})...")
+        tokenizer = AutoTokenizer.from_pretrained(config.model_name, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
+            config.model_name,
             dtype=dtype,
             trust_remote_code=True,
         )
@@ -94,7 +96,7 @@ class StepGenerateRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    max_tokens: int = Field(default=16, ge=1, le=2048)
+    max_tokens: int = Field(default=16, ge=1, le=DEFAULT_CONFIG.max_model_len)
 
 
 engine: Optional[LLMEngine] = None

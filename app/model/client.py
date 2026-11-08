@@ -3,6 +3,8 @@ import json
 import torch
 from typing import List, Optional, Dict, Tuple
 
+from app.config import DEFAULT_CONFIG
+
 
 class K8sModelClient:
     def __init__(
@@ -15,7 +17,7 @@ class K8sModelClient:
         try:
             from transformers import AutoTokenizer
 
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name or "HuggingFaceTB/SmolLM-135M-Instruct")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name or DEFAULT_CONFIG.model_name)
         except Exception as e:
             raise ImportError(f"Failed to import tokenizer: {e}")
 
