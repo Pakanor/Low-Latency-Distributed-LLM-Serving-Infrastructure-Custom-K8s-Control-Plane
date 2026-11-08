@@ -401,6 +401,7 @@ def test_scheduler_preemption_hf_equivalence():
         assert free + len(used) == 2
     assert a.is_finished() and b.is_finished()
     assert sch.preemption_count >= 1
+    assert max(sch.preemption_counts.values()) >= 2
     assert a.output_token_ids == bases[("p1", 14)]
     assert b.output_token_ids == bases[("pb", 10)]
     assert mgr.get_allocator().get_num_free_blocks() == 2

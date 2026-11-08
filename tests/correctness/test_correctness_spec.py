@@ -1,6 +1,6 @@
 """Correctness tests for paged KV/attention/scheduler (deterministic, CPU-friendly where possible).
 
-Run: HF_HUB_OFFLINE=1 PYTHONPATH=. venv/bin/python -m pytest tests/test_correctness_spec.py -q
+Run after activating the environment: HF_HUB_OFFLINE=1 PYTHONPATH=. python -m pytest tests/test_correctness_spec.py -q
 """
 import math
 import os
