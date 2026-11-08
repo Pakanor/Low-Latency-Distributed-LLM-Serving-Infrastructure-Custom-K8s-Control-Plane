@@ -16,9 +16,16 @@ from typing import Iterable
 import torch
 from transformers import AutoModelForCausalLM
 
+from app.config import (
+    DEFAULT_CONFIG,
+    RuntimeConfig,
+    calculate_kv_blocks,
+    configure_runtime,
+)
 from app.engine.llm_engine import LLMEngine
 from app.memory.manager import PagedKVCacheManager
 from app.scheduler.scheduler import Scheduler
+from app.memory.strategies import resolve_dtype, resolve_device
 
 
 @dataclass(frozen=True)
@@ -56,7 +63,8 @@ def build_workload(model, count: int, seed: int, min_prompt: int, max_prompt: in
 
 
 def run_variant(model, workload: Iterable[Request], variant: str, tokens_per_block: int,
-                total_blocks: int, max_batch_size: int, max_num_batched_tokens: int) -> Result:
+                total_blocks: int, max_batch_size: int, max_num_batched_tokens: int,
+                max_model_len: int, dtype: torch.dtype, device: torch.device) -> Result:
     workload = list(workload)
     blocks_per_seq_p95 = sum(
         math.ceil((len(request.prompt_token_ids) + request.max_tokens) / tokens_per_block)
@@ -66,8 +74,8 @@ def run_variant(model, workload: Iterable[Request], variant: str, tokens_per_blo
         model.config,
         total_blocks=total_blocks,
         block_size=tokens_per_block,
-        dtype=torch.float32,
-        device="cpu",
+        dtype=dtype,
+        device=device,
         total_cpu_blocks=1,
     )
     scheduler = Scheduler(
@@ -76,6 +84,7 @@ def run_variant(model, workload: Iterable[Request], variant: str, tokens_per_blo
         max_num_batched_tokens=max_num_batched_tokens,
         block_size=tokens_per_block,
         allocator=manager.get_allocator(),
+        max_model_len=max_model_len,
     )
     engine = LLMEngine(kv_cache_manager=manager, scheduler=scheduler, model=model)
     sequences = [
@@ -138,7 +147,7 @@ def write_csv(path: Path, results: list[Result]) -> None:
             ])
 
 
-def write_svg(path: Path, results: list[Result]) -> None:
+def write_svg(path: Path, results: list[Result], budget_mib: int) -> None:
     width, height = 760, 420
     chart_left, chart_top, chart_width, chart_height = 80, 40, 640, 280
     max_value = max(result.max_parallel for result in results) or 1
@@ -161,7 +170,7 @@ def write_svg(path: Path, results: list[Result]) -> None:
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
   <style>text {{ font: 16px sans-serif; fill: #25323a; }} .title {{ font-size: 20px; font-weight: 600; }}</style>
   <rect width="100%" height="100%" fill="#f7f4ee" />
-  <text x="{width / 2}" y="25" text-anchor="middle" class="title">Maximum concurrent sequences at 512 MiB KV budget</text>
+    <text x="{width / 2}" y="25" text-anchor="middle" class="title">Maximum concurrent sequences at {budget_mib} MiB KV budget</text>
   <line x1="{chart_left}" y1="{chart_top + chart_height}" x2="{chart_left + chart_width}" y2="{chart_top + chart_height}" stroke="#25323a" />
   <line x1="{chart_left}" y1="{chart_top}" x2="{chart_left}" y2="{chart_top + chart_height}" stroke="#25323a" />
   <text x="25" y="{chart_top + chart_height / 2}" transform="rotate(-90 25 {chart_top + chart_height / 2})" text-anchor="middle">sequences</text>
@@ -173,11 +182,15 @@ def write_svg(path: Path, results: list[Result]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="HuggingFaceTB/SmolLM-135M-Instruct")
+    parser.add_argument("--model", default=DEFAULT_CONFIG.model_name)
     parser.add_argument("--requests", type=int, default=64)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--budget-mib", type=int, default=512)
-    parser.add_argument("--max-model-len", type=int, default=2048)
+    parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG.seed)
+    parser.add_argument("--dtype", default=DEFAULT_CONFIG.dtype)
+    parser.add_argument("--device", default=DEFAULT_CONFIG.device)
+    parser.add_argument("--budget-mib", type=int, default=DEFAULT_CONFIG.budget_mib)
+    parser.add_argument("--max-model-len", type=int, default=DEFAULT_CONFIG.max_model_len)
+    parser.add_argument("--block-size", type=int, default=DEFAULT_CONFIG.block_size)
+    parser.add_argument("--num-threads", type=int, default=DEFAULT_CONFIG.num_threads)
     parser.add_argument("--min-prompt", type=int, default=8)
     parser.add_argument("--max-prompt", type=int, default=48)
     parser.add_argument("--min-output", type=int, default=8)
@@ -189,50 +202,63 @@ def main() -> None:
 
     if args.requests < 1:
         raise ValueError("--requests must be positive")
-    if args.max_prompt + args.max_output > args.max_model_len:
+    config = RuntimeConfig(
+        model_name=args.model,
+        dtype=args.dtype,
+        device=args.device,
+        budget_mib=args.budget_mib,
+        max_model_len=args.max_model_len,
+        block_size=args.block_size,
+        num_threads=args.num_threads,
+        seed=args.seed,
+    )
+    configure_runtime(config)
+    if args.max_prompt + args.max_output > config.max_model_len:
         raise ValueError("prompt and output ranges must fit inside --max-model-len")
 
-    torch.manual_seed(args.seed)
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+    torch.manual_seed(config.seed)
+    dtype = resolve_dtype(config.dtype)
+    device = resolve_device(config.device)
+    model = AutoModelForCausalLM.from_pretrained(config.model_name, torch_dtype=dtype)
+    model = model.to(device)
     model.eval()
     workload = build_workload(
-        model, args.requests, args.seed, args.min_prompt, args.max_prompt,
+        model, args.requests, config.seed, args.min_prompt, args.max_prompt,
         args.min_output, args.max_output,
     )
 
-    bytes_per_token = (
-        2 * model.config.num_hidden_layers
-        * getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)
-        * getattr(model.config, "head_dim", model.config.hidden_size // model.config.num_attention_heads)
-        * torch.tensor([], dtype=torch.float32).element_size()
+    paged_blocks = calculate_kv_blocks(
+        model.config, dtype, config.budget_mib, config.block_size
     )
-    budget_bytes = args.budget_mib * 1024 * 1024
-    paged_blocks = budget_bytes // (16 * bytes_per_token)
-    contiguous_blocks = budget_bytes // (args.max_model_len * bytes_per_token)
+    contiguous_blocks = calculate_kv_blocks(
+        model.config, dtype, config.budget_mib, config.max_model_len
+    )
     if paged_blocks < 1 or contiguous_blocks < 1:
         raise ValueError("KV budget is too small for the selected model and context")
 
     paged = run_variant(
-        model, workload, "paged", 16, paged_blocks,
-        args.max_batch_size, args.max_batched_tokens,
+        model, workload, "paged", config.block_size, paged_blocks,
+        args.max_batch_size, args.max_batched_tokens, config.max_model_len,
+        dtype, device,
     )
     contiguous = run_variant(
-        model, workload, "contiguous", args.max_model_len, contiguous_blocks,
-        args.max_batch_size, args.max_batched_tokens,
+        model, workload, "contiguous", config.max_model_len, contiguous_blocks,
+        args.max_batch_size, args.max_batched_tokens, config.max_model_len,
+        dtype, device,
     )
     if paged.outputs != contiguous.outputs:
         raise AssertionError("paged and contiguous variants produced different tokens")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(args.output_dir / "throughput_results.csv", [paged, contiguous])
-    write_svg(args.output_dir / "throughput_benchmark.svg", [paged, contiguous])
+    write_svg(args.output_dir / "throughput_benchmark.svg", [paged, contiguous], config.budget_mib)
     print("variant,max_parallel,output_tokens,seconds,tokens_per_second,preemptions")
     for result in (paged, contiguous):
         print(
             f"{result.variant},{result.max_parallel},{result.output_tokens},"
             f"{result.elapsed_seconds:.3f},{result.tokens_per_second:.2f},{result.preemptions}"
         )
-    print(f"identical_outputs=true requests={args.requests} seed={args.seed}")
+    print(f"identical_outputs=true requests={args.requests} seed={config.seed}")
 
 
 if __name__ == "__main__":
