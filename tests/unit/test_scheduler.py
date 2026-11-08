@@ -1,3 +1,5 @@
+import pytest
+
 from app.scheduler.sequence import Sequence, SequenceStatus
 from app.scheduler.scheduler import Scheduler
 from app.memory.manager import PagedKVCacheManager
@@ -11,7 +13,11 @@ def test_scheduler_prefill_and_decode_limits():
         head_dim=64
     )
     
-    scheduler = Scheduler(kv_cache_manager=manager, max_batch_size=2)
+    scheduler = Scheduler(
+        kv_cache_manager=manager,
+        max_batch_size=2,
+        max_model_len=2048,
+    )
 
     seq1 = Sequence(seq_id=1, prompt_token_ids=[1] * 10, max_tokens=5)
     seq2 = Sequence(seq_id=2, prompt_token_ids=[2] * 20, max_tokens=5)
@@ -33,3 +39,15 @@ def test_scheduler_prefill_and_decode_limits():
     outputs_decode = scheduler.schedule()
     assert len(outputs_decode.scheduled_prefills) == 0
     assert len(outputs_decode.scheduled_decodes) == 2
+
+
+def test_scheduler_requires_max_model_len():
+    manager = PagedKVCacheManager(
+        total_blocks=10,
+        block_size=16,
+        num_heads=8,
+        head_dim=64,
+    )
+
+    with pytest.raises(ValueError, match="max_model_len"):
+        Scheduler(kv_cache_manager=manager, max_model_len=None)

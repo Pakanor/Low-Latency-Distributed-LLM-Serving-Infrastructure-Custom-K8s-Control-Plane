@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional
 
+from app.config import DEFAULT_CONFIG
 from app.scheduler.sequence import Sequence, SequenceStatus
 
 
@@ -16,11 +17,11 @@ class Scheduler:
         self,
         kv_cache_manager=None,
         max_batch_size: int = 8,
-        max_num_batched_tokens: int = 2048,
+        max_num_batched_tokens: int = DEFAULT_CONFIG.max_model_len,
         page_allocator=None,
         block_size: Optional[int] = None,
         allocator=None,
-        max_model_len: Optional[int] = None,
+        max_model_len: Optional[int] = DEFAULT_CONFIG.max_model_len,
     ) -> None:
         self.kv_cache_manager = kv_cache_manager
         self.allocator = (
@@ -33,10 +34,13 @@ class Scheduler:
         self.block_size = block_size or getattr(kv_cache_manager, "block_size", None)
         if not self.block_size or self.block_size <= 0:
             raise ValueError("Scheduler requires a positive block_size")
+        if max_model_len is None or max_model_len <= 0:
+            raise ValueError("Scheduler requires max_model_len")
         self.max_batch_size = max_batch_size
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_model_len = max_model_len
         self.preemption_count = 0
+        self.preemption_counts: dict[int, int] = {}
 
         self.waiting: List[Sequence] = []
         self.running: List[Sequence] = []
@@ -96,6 +100,9 @@ class Scheduler:
                 self._free_blocks(seq)
                 seq.output_token_ids.clear()
                 self.preemption_count += 1
+                self.preemption_counts[seq.seq_id] = (
+                    self.preemption_counts.get(seq.seq_id, 0) + 1
+                )
                 self.waiting.insert(0, seq)
                 continue
 

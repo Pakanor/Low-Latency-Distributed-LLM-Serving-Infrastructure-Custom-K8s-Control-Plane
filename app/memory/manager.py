@@ -23,7 +23,9 @@ class PagedKVCacheManager:
     ) -> "PagedKVCacheManager":
         num_attention_heads = config.num_attention_heads
         num_kv_heads = getattr(config, "num_key_value_heads", num_attention_heads)
-        head_dim = getattr(config, "head_dim", config.hidden_size // num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // num_attention_heads
         return cls(
             total_blocks=total_blocks,
             block_size=block_size,
