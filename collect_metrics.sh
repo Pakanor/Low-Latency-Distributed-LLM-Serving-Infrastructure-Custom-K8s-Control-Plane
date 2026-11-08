@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-DIR="/home/roberto/Projects/llm-infra"
+set -euo pipefail
+
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$DIR/logs"
 OUT="$DIR/logs/metrics_$(date +%Y%m%d_%H%M%S).log"
 echo "# timestamp kv_cache_free_pages_ratio kv_cache_active_streams kv_cache_preemptions_total" > "$OUT"
