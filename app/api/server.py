@@ -25,6 +25,7 @@ tokenizer = None
 model_device: torch.device = torch.device("cpu")
 kv_cache_store: Dict[int, Any] = {}
 _step_task: Optional[asyncio.Task] = None
+step_event = asyncio.Event()
 
 
 def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
@@ -59,6 +60,7 @@ async def lifespan(app_):
             sys.exit(1)
     if engine is not None:
         engine.model = model
+        engine.update_event = step_event
     _step_task = asyncio.create_task(_step_loop())
     yield
     if _step_task is not None:
@@ -109,14 +111,20 @@ def set_engine(engine_instance: LLMEngine) -> None:
 
 async def _step_loop():
     while True:
+        await step_event.wait()
+        step_event.clear()
+        if engine is None:
+            continue
+        if not engine.has_unfinished_requests():
+            continue
+        try:
+            await asyncio.to_thread(engine.step)
+        except RuntimeError as e:
+            logger.warning(f"Scheduler OOM, skipping step: {e}")
+        except Exception as e:
+            logger.error(f"Step loop execution error: {e}")
         if engine is not None and engine.has_unfinished_requests():
-            try:
-                await asyncio.to_thread(engine.step)
-            except RuntimeError as e:
-                logger.warning(f"Scheduler OOM, skipping step: {e}")
-            except Exception as e:
-                logger.error(f"Step loop execution error: {e}")
-        await asyncio.sleep(0.005)
+            step_event.set()
 
 
 @app.get("/health")
@@ -201,8 +209,8 @@ async def create_completion(request: CompletionRequest):
         max_tokens=request.max_tokens,
     )
 
-    if engine.update_event is None:
-        engine.update_event = asyncio.Event()
+    engine.update_event = step_event
+    step_event.set()
 
     async def token_generator() -> AsyncGenerator[str, None]:
         last_yielded_count = 0
