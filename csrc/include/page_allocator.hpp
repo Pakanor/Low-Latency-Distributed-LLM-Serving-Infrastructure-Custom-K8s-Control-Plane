@@ -153,8 +153,12 @@ public:
         }
     }
 
-    ~PageAllocator() = default;
-
+    ~PageAllocator() {
+        if (base_host_ptr_) {
+            free(base_host_ptr_);
+            base_host_ptr_ = nullptr;
+        }
+    }
     PageAllocator(const PageAllocator&) = delete;
     PageAllocator& operator=(const PageAllocator&) = delete;
 

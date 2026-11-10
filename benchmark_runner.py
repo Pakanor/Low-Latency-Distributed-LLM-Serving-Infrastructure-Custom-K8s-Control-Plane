@@ -5,8 +5,11 @@ Jeden punkt wejścia dla wszystkich testów wydajnościowych:
   - fragmentation  - C++ PageAllocator fragmentation benchmark (csrc/fragmentation_bench)
   - thread-safety  - C++ PageAllocator thread-safety test (csrc/thread_safety_test)
   - engine-hf      - Python 1:1 comparison: Paged KV Cache engine (/generate)
-                     vs standard HuggingFace baseline (model.generate)
+                      vs standard HuggingFace baseline (model.generate)
+  - throughput     - Python throughput benchmark: paged vs contiguous KV allocation
+                      at a fixed RAM budget (throughput_benchmark.py)
 
+"""
 
 from __future__ import annotations
 
@@ -25,11 +28,12 @@ if str(ROOT) not in sys.path:
 
 from app.config import DEFAULT_CONFIG  # noqa: E402
 
-AVAILABLE_TESTS = ("fragmentation", "thread-safety", "engine-hf", "all")
+AVAILABLE_TESTS = ("fragmentation", "thread-safety", "engine-hf", "throughput", "all")
 
 FRAGMENTATION_BIN = ROOT / "csrc" / "fragmentation_bench"
 THREAD_SAFETY_BIN = ROOT / "csrc" / "thread_safety_test"
 UNIFIED_BENCH = ROOT / "benchmark_comparison_unified.py"
+THROUGHPUT_BENCH = ROOT / "throughput_benchmark.py"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +78,39 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Pomiń scenariusz silnika (engine-hf)")
     parser.add_argument("--skip-baseline", action="store_true",
                         help="Pomiń scenariusz baseline HF (engine-hf)")
+    # ---- throughput options ----
+    parser.add_argument("--throughput-requests", type=int, default=None,
+                        help="--requests dla throughput_benchmark.py (domyślnie 64)")
+    parser.add_argument("--throughput-seed", type=int, default=None,
+                        help="--seed dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-dtype", default=None,
+                        help="--dtype dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-device", default=None,
+                        help="--device dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-budget-mib", type=int, default=None,
+                        help="--budget-mib dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-max-model-len", type=int, default=None,
+                        help="--max-model-len dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-block-size", type=int, default=None,
+                        help="--block-size dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-num-threads", type=int, default=None,
+                        help="--num-threads dla throughput_benchmark.py (domyślnie z DEFAULT_CONFIG)")
+    parser.add_argument("--throughput-min-prompt", type=int, default=None,
+                        help="--min-prompt dla throughput_benchmark.py (domyślnie 8)")
+    parser.add_argument("--throughput-max-prompt", type=int, default=None,
+                        help="--max-prompt dla throughput_benchmark.py (domyślnie 48)")
+    parser.add_argument("--throughput-min-output", type=int, default=None,
+                        help="--min-output dla throughput_benchmark.py (domyślnie 8)")
+    parser.add_argument("--throughput-max-output", type=int, default=None,
+                        help="--max-output dla throughput_benchmark.py (domyślnie 24)")
+    parser.add_argument("--throughput-max-batch-size", type=int, default=None,
+                        help="--max-batch-size dla throughput_benchmark.py (domyślnie 64)")
+    parser.add_argument("--throughput-max-batched-tokens", type=int, default=None,
+                        help="--max-batched-tokens dla throughput_benchmark.py (domyślnie 8192)")
+    parser.add_argument("--throughput-output-dir", default=None,
+                        help="--output-dir dla throughput_benchmark.py (domyślnie .)")
+    parser.add_argument("--throughput-extra-args", default=None,
+                        help="Dodatkowe argumenty przekazane do throughput_benchmark.py")
     # ---- general ----
     parser.add_argument("--model", default=None,
                         help=argparse.SUPPRESS)  # model zawsze z konfiguracji/ENV
@@ -90,7 +127,7 @@ def resolve_tests(raw: str) -> list[str]:
             f"Nieznane testy: {', '.join(invalid)}. Dostępne: {', '.join(AVAILABLE_TESTS)}"
         )
     if "all" in selected:
-        return ["fragmentation", "thread-safety", "engine-hf"]
+        return ["fragmentation", "thread-safety", "engine-hf", "throughput"]
     return selected
 
 
@@ -180,6 +217,65 @@ def run_engine_hf(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_throughput(args: argparse.Namespace) -> dict[str, Any]:
+    if not THROUGHPUT_BENCH.exists():
+        raise SystemExit(f"Nie znaleziono skryptu {THROUGHPUT_BENCH}")
+
+    cmd = [sys.executable, str(THROUGHPUT_BENCH)]
+
+    # Mapowanie argumentów runnera na argumenty throughput_benchmark.py.
+    # Pomijamy --model (model zawsze z konfiguracji/ENV).
+    if args.throughput_requests is not None:
+        cmd += ["--requests", str(args.throughput_requests)]
+    if args.throughput_seed is not None:
+        cmd += ["--seed", str(args.throughput_seed)]
+    if args.throughput_dtype is not None:
+        cmd += ["--dtype", str(args.throughput_dtype)]
+    if args.throughput_device is not None:
+        cmd += ["--device", str(args.throughput_device)]
+    if args.throughput_budget_mib is not None:
+        cmd += ["--budget-mib", str(args.throughput_budget_mib)]
+    if args.throughput_max_model_len is not None:
+        cmd += ["--max-model-len", str(args.throughput_max_model_len)]
+    if args.throughput_block_size is not None:
+        cmd += ["--block-size", str(args.throughput_block_size)]
+    if args.throughput_num_threads is not None:
+        cmd += ["--num-threads", str(args.throughput_num_threads)]
+    if args.throughput_min_prompt is not None:
+        cmd += ["--min-prompt", str(args.throughput_min_prompt)]
+    if args.throughput_max_prompt is not None:
+        cmd += ["--max-prompt", str(args.throughput_max_prompt)]
+    if args.throughput_min_output is not None:
+        cmd += ["--min-output", str(args.throughput_min_output)]
+    if args.throughput_max_output is not None:
+        cmd += ["--max-output", str(args.throughput_max_output)]
+    if args.throughput_max_batch_size is not None:
+        cmd += ["--max-batch-size", str(args.throughput_max_batch_size)]
+    if args.throughput_max_batched_tokens is not None:
+        cmd += ["--max-batched-tokens", str(args.throughput_max_batched_tokens)]
+    if args.throughput_output_dir is not None:
+        cmd += ["--output-dir", str(args.throughput_output_dir)]
+    if args.throughput_extra_args is not None:
+        cmd += args.throughput_extra_args.split()
+
+    print(f"\n[URUCHAMIAM] throughput_benchmark.py: {' '.join(cmd[1:])}")
+    model_name = os.getenv("MODEL_NAME", DEFAULT_CONFIG.model_name)
+    print(f"[throughput] Model (z konfiguracji/ENV): {model_name}")
+    t0 = time.perf_counter()
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    t1 = time.perf_counter()
+    out = proc.stdout + proc.stderr
+    print(out)
+    if proc.returncode != 0:
+        print(f"[throughput_benchmark.py] zakończony z kodem błędu {proc.returncode}")
+    return {
+        "test": "throughput",
+        "elapsed": t1 - t0,
+        "returncode": proc.returncode,
+        "output": out,
+    }
+
+
 def print_summary(results: list[dict[str, Any]]) -> None:
     print("\n" + "=" * 70)
     print("PODSUMOWANIE WSZYSTKICH TESTÓW")
@@ -209,6 +305,8 @@ def main() -> None:
         results.append(run_thread_safety(args))
     if "engine-hf" in tests:
         results.append(run_engine_hf(args))
+    if "throughput" in tests:
+        results.append(run_throughput(args))
 
     print_summary(results)
 
