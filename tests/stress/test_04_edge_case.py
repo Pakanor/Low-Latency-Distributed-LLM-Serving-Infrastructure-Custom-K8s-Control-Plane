@@ -90,9 +90,7 @@ def test_prompt_larger_than_total_allocator_capacity():
     )
     engine = LLMEngine(kv_cache_manager=kv_mgr, scheduler=scheduler, model_client=MockModelClient(num_layers=1))
 
-    seq = engine.add_request(prompt_token_ids=list(range(12)), max_tokens=5)
+    with pytest.raises(ValueError, match="requires .* blocks for .* but the KV cache pool has only 2 blocks"):
+        engine.add_request(prompt_token_ids=list(range(12)), max_tokens=5)
 
-    engine.step()
-
-    assert seq.status == SequenceStatus.WAITING
     assert kv_mgr.get_allocator().get_num_free_blocks() == 2
