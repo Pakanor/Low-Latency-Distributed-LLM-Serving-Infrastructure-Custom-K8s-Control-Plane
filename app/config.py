@@ -14,15 +14,19 @@ class RuntimeConfig:
     block_size: int = 16
     num_threads: int | None = None
     seed: int = 42
+    max_batch_size: int = 8
+    max_num_batched_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.device not in {"cpu", "cuda"}:
             raise ValueError(f"Unsupported device: {self.device}; expected cpu or cuda")
         if self.dtype not in {"fp32", "fp16", "bf16"}:
             raise ValueError(f"Unsupported dtype: {self.dtype}; expected fp32, fp16, or bf16")
-        for name in ("budget_mib", "block_size", "max_model_len"):
+        for name in ("budget_mib", "block_size", "max_model_len", "max_batch_size"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be greater than zero")
+        if self.max_num_batched_tokens is not None and self.max_num_batched_tokens <= 0:
+            raise ValueError("max_num_batched_tokens must be greater than zero or None")
         if self.num_threads is not None and self.num_threads <= 0:
             raise ValueError("num_threads must be greater than zero or None")
 

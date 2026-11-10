@@ -13,6 +13,10 @@ from app.scheduler.scheduler import Scheduler
 parser = argparse.ArgumentParser(description="Run the LLM API server")
 parser.add_argument("--device", default=DEFAULT_CONFIG.device)
 parser.add_argument("--num-threads", type=int, default=DEFAULT_CONFIG.num_threads)
+parser.add_argument("--max-batch-size", type=int, default=DEFAULT_CONFIG.max_batch_size)
+parser.add_argument(
+    "--max-num-batched-tokens", type=int, default=None
+)
 args = parser.parse_args()
 runtime_config = RuntimeConfig(
     model_name=server.MODEL_NAME,
@@ -23,6 +27,8 @@ runtime_config = RuntimeConfig(
     block_size=DEFAULT_CONFIG.block_size,
     num_threads=args.num_threads,
     seed=DEFAULT_CONFIG.seed,
+    max_batch_size=args.max_batch_size,
+    max_num_batched_tokens=args.max_num_batched_tokens,
 )
 
 if not server.load_model(runtime_config):
@@ -43,8 +49,8 @@ manager = PagedKVCacheManager.from_model_config(
 )
 scheduler = Scheduler(
     kv_cache_manager=manager,
-    max_batch_size=2,
-    max_num_batched_tokens=32,
+    max_batch_size=runtime_config.max_batch_size,
+    max_num_batched_tokens=runtime_config.max_num_batched_tokens or runtime_config.max_model_len,
     block_size=runtime_config.block_size,
     allocator=manager.get_allocator(),
     max_model_len=runtime_config.max_model_len,
