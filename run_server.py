@@ -68,4 +68,4 @@ print(f"KV cache strategy: {type(manager.strategy).__name__}")
 print(f"KV cache device: {manager.device}")
 print(f"KV cache geometry: {manager.num_layers} layers, {manager.num_heads} kv heads, {manager.head_dim} head dim")
 
-uvicorn.run(app=server.app, host="0.0.0.0", port=8000)
+uvicorn.run(app=server.app, host=args.host, port=args.port)
