@@ -12,6 +12,8 @@ from app.scheduler.scheduler import Scheduler
 
 parser = argparse.ArgumentParser(description="Run the LLM API server")
 parser.add_argument("--device", default=DEFAULT_CONFIG.device)
+parser.add_argument("--host", default="0.0.0.0")
+parser.add_argument("--port", type=int, default=8000)
 parser.add_argument("--num-threads", type=int, default=DEFAULT_CONFIG.num_threads)
 parser.add_argument("--max-batch-size", type=int, default=DEFAULT_CONFIG.max_batch_size)
 parser.add_argument(
