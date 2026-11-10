@@ -4,7 +4,7 @@ import json
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Any, Dict, List, Optional
+from typing import AsyncGenerator, Any, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import torch
@@ -23,7 +23,6 @@ MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_CONFIG.model_name)
 model = None
 tokenizer = None
 model_device: torch.device = torch.device("cpu")
-kv_cache_store: Dict[int, Any] = {}
 _step_task: Optional[asyncio.Task] = None
 step_event = asyncio.Event()
 
@@ -55,7 +54,7 @@ def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
 async def lifespan(app_):
     global model, tokenizer, _step_task
     if model is None:
-        if not load_model():
+        if not load_model(DEFAULT_CONFIG):
             logger.error("Fatal: Could not load model on startup")
             sys.exit(1)
     if engine is not None:
@@ -75,7 +74,6 @@ async def lifespan(app_):
     if tokenizer is not None:
         del tokenizer
         tokenizer = None
-    kv_cache_store.clear()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     logger.info("Server shutdown complete.")
@@ -85,15 +83,10 @@ app = FastAPI(title="LLM Inference Engine API", lifespan=lifespan)
 
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
-    max_tokens: int = Field(default=50, ge=1, le=256)
+    prompt: str = Field(..., min_length=1)
+    max_tokens: int = Field(default=50, ge=1, le=DEFAULT_CONFIG.max_model_len)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-
-
-class StepGenerateRequest(BaseModel):
-    seq_id: int
-    input_ids: List[int]
 
 
 class CompletionRequest(BaseModel):
@@ -137,66 +130,6 @@ def health():
     }
 
 
-@app.post("/generate")
-async def generate(req: GenerateRequest):
-    if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model or tokenizer not loaded")
-
-    try:
-        with torch.no_grad():
-            inputs = tokenizer(req.prompt, return_tensors="pt").to(model_device)
-
-            if inputs.input_ids.shape[1] > 2000:
-                raise HTTPException(status_code=400, detail="Prompt too long")
-
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-        text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return {
-            "response": text,
-            "tokens_generated": outputs.shape[1] - inputs.input_ids.shape[1],
-        }
-
-    except torch.OutOfMemoryError:
-        logger.error("CUDA OOM during generation")
-        raise HTTPException(status_code=507, detail="Out of memory")
-    except Exception as e:
-        logger.error(f"Generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
-
-
-@app.post("/generate_step")
-async def generate_step(req: StepGenerateRequest):
-    if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    try:
-        with torch.no_grad():
-            input_tensor = torch.tensor([req.input_ids], dtype=torch.long, device=model_device)
-            past_kv = kv_cache_store.get(req.seq_id, None)
-            outputs = model(input_tensor, past_key_values=past_kv, use_cache=True)
-            next_token_id = int(torch.argmax(outputs.logits[0, -1, :]))
-            kv_cache_store[req.seq_id] = outputs.past_key_values
-
-        if next_token_id == tokenizer.eos_token_id:
-            kv_cache_store.pop(req.seq_id, None)
-
-        return {
-            "seq_id": req.seq_id,
-            "next_token_id": next_token_id,
-            "is_eos": next_token_id == tokenizer.eos_token_id,
-        }
-    except Exception as e:
-        logger.error(f"Step execution failed for seq_id {req.seq_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest):
     if engine is None or tokenizer is None:
@@ -236,10 +169,49 @@ async def create_completion(request: CompletionRequest):
                     }
                     yield json.dumps(payload)
 
-        kv_cache_store.pop(sequence.seq_id, None)
         yield json.dumps({"finished": True, "text": ""})
 
     return EventSourceResponse(token_generator())
+
+
+@app.post("/generate")
+async def generate(req: GenerateRequest):
+    if engine is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="LLM Engine is not initialized")
+
+    prompt_tokens = tokenizer.encode(req.prompt, add_special_tokens=True)
+
+    if len(prompt_tokens) > DEFAULT_CONFIG.max_model_len:
+        raise HTTPException(status_code=400, detail="Prompt too long")
+
+    sequence = engine.add_request(
+        prompt_token_ids=prompt_tokens,
+        max_tokens=req.max_tokens,
+    )
+
+    engine.update_event = step_event
+    step_event.set()
+
+    try:
+        while not sequence.is_finished():
+            try:
+                await asyncio.wait_for(step_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            step_event.clear()
+
+        generated_tokens = sequence.output_token_ids
+        text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return {
+            "response": text,
+            "tokens_generated": len(generated_tokens),
+            "prompt_tokens": len(prompt_tokens),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
 
 @app.get("/metrics")
