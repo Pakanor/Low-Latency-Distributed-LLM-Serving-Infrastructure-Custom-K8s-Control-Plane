@@ -49,9 +49,7 @@ def calculate_kv_blocks(model_config, dtype: torch.dtype, budget_mib: int, block
     bytes_per_token = (
         2 * model_config.num_hidden_layers * num_kv_heads * head_dim * dtype.itemsize
     )
-    blocks = (budget_mib * 1024 * 1024) // (block_size * bytes_per_token)
-    if blocks <= 0:
-        raise ValueError("KV budget is too small for one cache block")
+    blocks = max(1, (budget_mib * 1024 * 1024) // (block_size * bytes_per_token))
     return blocks
 
 
