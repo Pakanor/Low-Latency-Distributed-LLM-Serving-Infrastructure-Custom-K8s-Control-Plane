@@ -7,13 +7,6 @@ Jeden punkt wejścia dla wszystkich testów wydajnościowych:
   - engine-hf      - Python 1:1 comparison: Paged KV Cache engine (/generate)
                      vs standard HuggingFace baseline (model.generate)
 
-Każdy test można wywołać osobno przez flagę --tests (np. --tests fragmentation
-lub --tests engine-hf). Domyślnie uruchamiane jest --tests all.
-
-Nazwa modelu dla testów opartych na modelu (engine-hf) pobierana jest wyłącznie
-z konfiguracji projektu (app.config.DEFAULT_CONFIG.model_name) lub zmiennej
-środowiskowej MODEL_NAME — bez hardkodowania.
-"""
 
 from __future__ import annotations
 
