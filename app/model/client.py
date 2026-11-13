@@ -1,9 +1,44 @@
 import urllib.request
 import json
+import base64
 import torch
 from typing import List, Optional, Dict, Tuple
 
 from app.config import DEFAULT_CONFIG
+
+
+def _serialize_tensor(tensor: torch.Tensor) -> str:
+    return base64.b64encode(tensor.cpu().numpy().tobytes()).decode("ascii")
+
+
+def _deserialize_tensor(data: str, dtype: torch.dtype, shape: Tuple[int, ...]) -> torch.Tensor:
+    buf = base64.b64decode(data.encode("ascii"))
+    arr = torch.frombuffer(buf, dtype=dtype).reshape(shape)
+    return arr
+
+
+def _serialize_past_kv(past_key_values: Tuple) -> List[Dict]:
+    serialized = []
+    for layer_kv in past_key_values:
+        key, value = layer_kv
+        serialized.append({
+            "key": _serialize_tensor(key),
+            "value": _serialize_tensor(value),
+            "key_shape": list(key.shape),
+            "value_shape": list(value.shape),
+            "dtype": str(key.dtype),
+        })
+    return serialized
+
+
+def _deserialize_past_kv(data: List[Dict]) -> Tuple:
+    past_kv = []
+    for layer in data:
+        dtype = getattr(torch, layer["dtype"].split(".")[-1])
+        key = _deserialize_tensor(layer["key"], dtype, tuple(layer["key_shape"]))
+        value = _deserialize_tensor(layer["value"], dtype, tuple(layer["value_shape"]))
+        past_kv.append((key, value))
+    return tuple(past_kv)
 
 
 class K8sModelClient:
@@ -28,10 +63,12 @@ class K8sModelClient:
         past_key_values: Optional[Tuple] = None,
     ) -> dict:
 
-        payload = {
+        payload: Dict = {
             "seq_id": seq_id,
             "input_ids": input_ids,
         }
+        if past_key_values is not None:
+            payload["past_key_values"] = _serialize_past_kv(past_key_values)
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.endpoint_url,
@@ -42,10 +79,13 @@ class K8sModelClient:
 
         with urllib.request.urlopen(req, timeout=5) as response:
             result = json.loads(response.read().decode("utf-8"))
-            return {
+            response_dict = {
                 "next_token_id": result["next_token_id"],
                 "is_eos": result.get("is_eos", False),
             }
+            if "past_key_values" in result:
+                response_dict["past_key_values"] = _deserialize_past_kv(result["past_key_values"])
+            return response_dict
 
 
 class MockModelClient:
