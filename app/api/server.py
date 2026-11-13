@@ -31,7 +31,7 @@ model = None
 tokenizer = None
 model_device: torch.device = torch.device("cpu")
 _step_task: Optional[asyncio.Task] = None
-step_event = asyncio.Event()
+step_event: Optional[asyncio.Event] = None
 
 
 def _admit(prompt_tokens: List[int], max_tokens: int) -> Sequence:
@@ -48,7 +48,6 @@ def _admit(prompt_tokens: List[int], max_tokens: int) -> Sequence:
         max_tokens=max_tokens,
         deadline=deadline,
     )
-    engine.update_event = step_event
     step_event.set()
     return sequence
 

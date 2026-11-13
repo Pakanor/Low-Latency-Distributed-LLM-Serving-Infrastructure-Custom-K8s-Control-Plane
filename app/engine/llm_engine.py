@@ -31,6 +31,7 @@ class LLMEngine:
         self.model = model
         self.seq_counter = 0
         self._seq_counter_lock = threading.Lock()
+        self._scheduler_lock = threading.Lock()
         self.update_event: Optional[asyncio.Event] = None
         self._paged_attention_registered = False
 
@@ -58,23 +59,25 @@ class LLMEngine:
             max_tokens=max_tokens,
             deadline=deadline,
         )
-        self.scheduler.add_sequence(seq)
+        with self._scheduler_lock:
+            self.scheduler.add_sequence(seq)
         return seq
 
     def sweep_abandoned(self) -> List[Sequence]:
-       
-        if self.scheduler is None:
-            return []
-        freed: List[Sequence] = []
-        now = time.time()
-        for seq in list(self.scheduler.running) + list(self.scheduler.waiting):
-            if seq.abandon_requested or (seq.deadline is not None and now >= seq.deadline):
-                self.scheduler.free_sequence(seq)
-                freed.append(seq)
-        return freed
+        with self._scheduler_lock:
+            if self.scheduler is None:
+                return []
+            freed: List[Sequence] = []
+            now = time.time()
+            for seq in list(self.scheduler.running) + list(self.scheduler.waiting):
+                if seq.abandon_requested or (seq.deadline is not None and now >= seq.deadline):
+                    self.scheduler.free_sequence(seq)
+                    freed.append(seq)
+            return freed
 
     def has_unfinished_requests(self) -> bool:
-        return self.scheduler.has_unfinished_sequences()
+        with self._scheduler_lock:
+            return self.scheduler.has_unfinished_sequences()
 
     def _local_generate_step(
         self,
@@ -216,19 +219,20 @@ class LLMEngine:
         return self._paged_forward_group(sequences, is_prefill)
 
     def step(self) -> Dict[str, List[Sequence]]:
-        try:
-            outputs = self.scheduler.schedule()
-        except RuntimeError as e:
-            logger.warning(f"Scheduler OOM, skipping step: {e}")
-            return {"finished": [], "running": []}
+        with self._scheduler_lock:
+            try:
+                outputs = self.scheduler.schedule()
+            except RuntimeError as e:
+                logger.warning(f"Scheduler OOM, skipping step: {e}")
+                return {"finished": [], "running": []}
 
-        prefills = outputs.scheduled_prefills
-        decodes = outputs.scheduled_decodes
+            prefills = outputs.scheduled_prefills
+            decodes = outputs.scheduled_decodes
 
-        if not prefills and not decodes:
-            return {"finished": [], "running": []}
+            if not prefills and not decodes:
+                return {"finished": [], "running": []}
 
-        all_active_seqs = prefills + decodes
+            all_active_seqs = prefills + decodes
 
         for sequences, is_prefill in ((prefills, True), (decodes, False)):
             if not sequences:
@@ -243,13 +247,14 @@ class LLMEngine:
             for seq, next_token in zip(valid, self._forward_group(valid, is_prefill)):
                 seq.append_token(next_token)
 
-        finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
-        running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
+        with self._scheduler_lock:
+            finished = [s for s in all_active_seqs if s.status == SequenceStatus.FINISHED]
+            running = [s for s in all_active_seqs if s.status == SequenceStatus.RUNNING]
 
-        for seq in finished:
-            self.scheduler.free_sequence(seq)
+            for seq in finished:
+                self.scheduler.free_sequence(seq)
 
-        if self.update_event is not None:
-            self.update_event.set()
+            if self.update_event is not None:
+                self.update_event.set()
 
-        return {"finished": finished, "running": running}
+            return {"finished": finished, "running": running}
