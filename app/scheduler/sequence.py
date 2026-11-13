@@ -18,7 +18,8 @@ class Sequence:
         prompt: str = "",
         prompt_token_ids: Optional[List[int]] = None,
         max_tokens: int = 128,
-        eos_token_id: Optional[int] = None
+        eos_token_id: Optional[int] = None,
+        deadline: Optional[float] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
@@ -33,6 +34,8 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.block_table: Optional[llm_allocator_cpp.SequenceBlockTable] = None
         self.logical_block_table: List[int] = []
+        self.deadline = deadline
+        self.abandon_requested: bool = False
 
     def get_len(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)

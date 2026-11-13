@@ -158,3 +158,8 @@ class Scheduler:
             self.waiting.remove(seq)
         if seq in self.swapped:
             self.swapped.remove(seq)
+
+    def is_full(self) -> bool:
+        if self.allocator is None:
+            return False
+        return self.allocator.get_num_free_blocks() < 1

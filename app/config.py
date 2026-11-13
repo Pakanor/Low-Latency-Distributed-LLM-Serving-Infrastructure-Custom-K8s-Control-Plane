@@ -42,6 +42,10 @@ def configure_runtime(config: RuntimeConfig) -> int:
 
 
 def calculate_kv_blocks(model_config, dtype: torch.dtype, budget_mib: int, block_size: int) -> int:
+    if budget_mib <= 0:
+        raise ValueError(f"KV budget must be greater than zero, got {budget_mib} MiB")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be greater than zero, got {block_size}")
     num_kv_heads = getattr(model_config, "num_key_value_heads", model_config.num_attention_heads)
     head_dim = getattr(model_config, "head_dim", None)
     if head_dim is None:

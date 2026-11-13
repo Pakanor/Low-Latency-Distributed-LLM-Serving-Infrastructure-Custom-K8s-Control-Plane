@@ -3,9 +3,10 @@ import sys
 import json
 import logging
 import asyncio
+import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Any, List, Optional
-from fastapi import FastAPI, HTTPException
+from typing import AsyncGenerator, List, Optional
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -14,17 +15,42 @@ from sse_starlette.sse import EventSourceResponse
 from app.config import DEFAULT_CONFIG, RuntimeConfig, configure_runtime
 from app.engine.llm_engine import LLMEngine
 from app.memory.strategies import resolve_device, resolve_dtype
+from app.scheduler.sequence import Sequence
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_CONFIG.model_name)
 
+# Wall-clock timeout (seconds) for any single request. Sequences that exceed
+# this are swept by the step loop and their KV blocks freed. Set to 0 to
+# disable (not recommended — it is the only thing that bounds KV growth).
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "0"))
+
 model = None
 tokenizer = None
 model_device: torch.device = torch.device("cpu")
 _step_task: Optional[asyncio.Task] = None
 step_event = asyncio.Event()
+
+
+def _admit(prompt_tokens: List[int], max_tokens: int) -> Sequence:
+    if engine is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="LLM Engine is not initialized")
+    if engine.scheduler.is_full():
+        raise HTTPException(
+            status_code=503,
+            detail="KV cache is full; wait for running requests to finish and retry.",
+        )
+    deadline = (time.monotonic() + REQUEST_TIMEOUT_SECONDS) if REQUEST_TIMEOUT_SECONDS > 0 else None
+    sequence = engine.add_request(
+        prompt_token_ids=prompt_tokens,
+        max_tokens=max_tokens,
+        deadline=deadline,
+    )
+    engine.update_event = step_event
+    step_event.set()
+    return sequence
 
 
 def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
@@ -52,7 +78,8 @@ def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
 
 @asynccontextmanager
 async def lifespan(app_):
-    global model, tokenizer, _step_task
+    global model, tokenizer, _step_task, step_event
+    step_event = asyncio.Event()
     if model is None:
         if not load_model(DEFAULT_CONFIG):
             logger.error("Fatal: Could not load model on startup")
@@ -108,6 +135,11 @@ async def _step_loop():
         step_event.clear()
         if engine is None:
             continue
+    
+        try:
+            engine.sweep_abandoned()
+        except Exception as e:
+            logger.warning(f"Sweep error: {e}")
         if not engine.has_unfinished_requests():
             continue
         try:
@@ -131,43 +163,49 @@ def health():
 
 
 @app.post("/v1/completions")
-async def create_completion(request: CompletionRequest):
-    if engine is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="LLM Engine is not initialized")
-
+async def create_completion(request: CompletionRequest, raw: Request):
     prompt_tokens = tokenizer.encode(request.prompt, add_special_tokens=True)
-
-    sequence = engine.add_request(
-        prompt_token_ids=prompt_tokens,
-        max_tokens=request.max_tokens,
-    )
-
-    engine.update_event = step_event
-    step_event.set()
+    sequence = _admit(prompt_tokens, request.max_tokens)
 
     async def token_generator() -> AsyncGenerator[str, None]:
         last_yielded_count = 0
+        try:
+            while not sequence.is_finished():
+                if await raw.is_disconnected():
+                    sequence.abandon_requested = True
+                    step_event.set()
+                    yield json.dumps({"error": "client_disconnected", "finished": True})
+                    return
 
-        while not sequence.is_finished():
-            try:
-                await asyncio.wait_for(engine.update_event.wait(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
-            engine.update_event.clear()
+                try:
+                    await asyncio.wait_for(engine.update_event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                engine.update_event.clear()
 
-            current_outputs = sequence.output_token_ids
-            if len(current_outputs) > last_yielded_count:
-                new_tokens = current_outputs[last_yielded_count:]
-                last_yielded_count = len(current_outputs)
-                is_finished = sequence.is_finished()
+                if sequence.deadline is not None and time.monotonic() >= sequence.deadline:
+                    sequence.abandon_requested = True
+                    step_event.set()
+                    yield json.dumps({"error": "timeout", "finished": True})
+                    return
 
-                for token_id in new_tokens:
-                    payload = {
-                        "text": tokenizer.decode([token_id], skip_special_tokens=True),
-                        "token_id": token_id,
-                        "finished": is_finished,
-                    }
-                    yield json.dumps(payload)
+                current_outputs = sequence.output_token_ids
+                if len(current_outputs) > last_yielded_count:
+                    new_tokens = current_outputs[last_yielded_count:]
+                    last_yielded_count = len(current_outputs)
+                    is_finished = sequence.is_finished()
+
+                    for token_id in new_tokens:
+                        payload = {
+                            "text": tokenizer.decode([token_id], skip_special_tokens=True),
+                            "token_id": token_id,
+                            "finished": is_finished,
+                        }
+                        yield json.dumps(payload)
+        finally:
+            if not sequence.is_finished():
+                sequence.abandon_requested = True
+                step_event.set()
 
         yield json.dumps({"finished": True, "text": ""})
 
@@ -175,30 +213,31 @@ async def create_completion(request: CompletionRequest):
 
 
 @app.post("/generate")
-async def generate(req: GenerateRequest):
-    if engine is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="LLM Engine is not initialized")
-
+async def generate(req: GenerateRequest, raw: Request):
     prompt_tokens = tokenizer.encode(req.prompt, add_special_tokens=True)
 
     if len(prompt_tokens) > DEFAULT_CONFIG.max_model_len:
         raise HTTPException(status_code=400, detail="Prompt too long")
 
-    sequence = engine.add_request(
-        prompt_token_ids=prompt_tokens,
-        max_tokens=req.max_tokens,
-    )
-
-    engine.update_event = step_event
-    step_event.set()
+    sequence = _admit(prompt_tokens, req.max_tokens)
 
     try:
         while not sequence.is_finished():
+            if await raw.is_disconnected():
+                sequence.abandon_requested = True
+                step_event.set()
+                raise HTTPException(status_code=499, detail="Client disconnected")
+
             try:
                 await asyncio.wait_for(step_event.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
             step_event.clear()
+
+            if sequence.deadline is not None and time.monotonic() >= sequence.deadline:
+                sequence.abandon_requested = True
+                step_event.set()
+                raise HTTPException(status_code=504, detail="Request timed out")
 
         generated_tokens = sequence.output_token_ids
         text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
@@ -208,8 +247,14 @@ async def generate(req: GenerateRequest):
             "prompt_tokens": len(prompt_tokens),
         }
     except HTTPException:
+        if not sequence.is_finished():
+            sequence.abandon_requested = True
+            step_event.set()
         raise
     except Exception as e:
+        if not sequence.is_finished():
+            sequence.abandon_requested = True
+            step_event.set()
         logger.error(f"Generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 

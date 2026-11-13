@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import torch
 from typing import List, Dict, Optional, Tuple
 from app.scheduler.sequence import Sequence, SequenceStatus
@@ -43,16 +44,30 @@ class LLMEngine:
     def add_request(
         self,
         prompt_token_ids: List[int],
-        max_tokens: int = 128
+        max_tokens: int = 128,
+        deadline: Optional[float] = None,
     ) -> Sequence:
         self.seq_counter += 1
         seq = Sequence(
             seq_id=self.seq_counter,
             prompt_token_ids=prompt_token_ids,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            deadline=deadline,
         )
         self.scheduler.add_sequence(seq)
         return seq
+
+    def sweep_abandoned(self) -> List[Sequence]:
+       
+        if self.scheduler is None:
+            return []
+        freed: List[Sequence] = []
+        now = time.time()
+        for seq in list(self.scheduler.running) + list(self.scheduler.waiting):
+            if seq.abandon_requested or (seq.deadline is not None and now >= seq.deadline):
+                self.scheduler.free_sequence(seq)
+                freed.append(seq)
+        return freed
 
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_sequences()
