@@ -33,7 +33,6 @@ class Sequence:
         self.max_tokens = max_tokens
         self.eos_token_id = eos_token_id
         self.block_table: Optional[llm_allocator_cpp.SequenceBlockTable] = None
-        self.logical_block_table: List[int] = []
         self.deadline = deadline
         self.abandon_requested: bool = False
 

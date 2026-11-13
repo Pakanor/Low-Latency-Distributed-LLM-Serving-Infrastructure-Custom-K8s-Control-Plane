@@ -72,18 +72,14 @@ class Scheduler:
             self.kv_cache_manager.allocate_prefix_blocks(seq)
             return
 
-        needed_blocks = (seq.get_len() + self.block_size - 1) // self.block_size
-        allocated_ids = self.allocator.allocate_blocks(needed_blocks)
-        seq.logical_block_table.extend(allocated_ids)
+        raise RuntimeError("Scheduler requires kv_cache_manager for block allocation")
 
     def _free_blocks(self, seq: Sequence) -> None:
         if self.kv_cache_manager is not None:
             self.kv_cache_manager.free_sequence(seq)
             return
 
-        for block_id in seq.logical_block_table:
-            self.allocator.free_block(block_id)
-        seq.logical_block_table.clear()
+        raise RuntimeError("Scheduler requires kv_cache_manager for block freeing")
 
     def schedule(self) -> SchedulerOutputs:
         scheduled_decodes: List[Sequence] = []
