@@ -243,7 +243,7 @@ def test_preemption_preserves_output_equivalence(model_tok):
     from app.scheduler.scheduler import Scheduler
 
     mgr = PagedKVCacheManager.from_model_config(
-        model.config, total_blocks=2, block_size=8, dtype=torch.float32, device="cpu", total_cpu_blocks=1
+        model.config, total_blocks=3, block_size=8, dtype=torch.float32, device="cpu", total_cpu_blocks=1
     )
     sch = Scheduler(
         kv_cache_manager=mgr, max_batch_size=2, max_num_batched_tokens=64, block_size=8,
