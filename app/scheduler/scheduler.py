@@ -121,18 +121,23 @@ class Scheduler:
         current_batch_tokens = len(scheduled_decodes)
         ignored: List[Sequence] = []
 
-        while self.waiting:
-            seq = self.waiting[0]
+        i = 0
+        while i < len(self.waiting):
+            seq = self.waiting[i]
             seq_len = seq.total_len
             needed_blocks = (seq_len + self.block_size - 1) // self.block_size
+
             if needed_blocks > self.allocator.get_num_free_blocks():
                 ignored.append(seq)
-                break
+                i += 1
+                continue
+
             if current_batch_tokens + seq_len > self.max_num_batched_tokens:
                 ignored.append(seq)
-                break
+                i += 1
+                continue
 
-            self.waiting.pop(0)
+            self.waiting.pop(i)
             self._allocate_prefix(seq)
             seq.status = SequenceStatus.RUNNING
             self.running.append(seq)
