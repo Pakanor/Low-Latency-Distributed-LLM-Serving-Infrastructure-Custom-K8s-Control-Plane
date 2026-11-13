@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import threading
 import time
 import torch
 from typing import List, Dict, Optional, Tuple
@@ -29,6 +30,7 @@ class LLMEngine:
         self.model_client = model_client
         self.model = model
         self.seq_counter = 0
+        self._seq_counter_lock = threading.Lock()
         self.update_event: Optional[asyncio.Event] = None
         self._paged_attention_registered = False
 
@@ -47,9 +49,11 @@ class LLMEngine:
         max_tokens: int = 128,
         deadline: Optional[float] = None,
     ) -> Sequence:
-        self.seq_counter += 1
+        with self._seq_counter_lock:
+            self.seq_counter += 1
+            seq_id = self.seq_counter
         seq = Sequence(
-            seq_id=self.seq_counter,
+            seq_id=seq_id,
             prompt_token_ids=prompt_token_ids,
             max_tokens=max_tokens,
             deadline=deadline,
