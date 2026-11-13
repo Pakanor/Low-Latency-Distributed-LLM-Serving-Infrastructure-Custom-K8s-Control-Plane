@@ -5,6 +5,7 @@ DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$DIR/logs"
 OUT="$DIR/logs/metrics_$(date +%Y%m%d_%H%M%S).log"
 echo "# timestamp kv_cache_free_pages_ratio kv_cache_active_streams kv_cache_preemptions_total" > "$OUT"
+trap 'exit 0' INT TERM HUP
 while :; do
   TS=$(date +%s.%3N)
   M=$(curl -s --connect-timeout 1 http://localhost:8000/metrics)
