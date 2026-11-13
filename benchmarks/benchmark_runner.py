@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -30,10 +30,11 @@ from app.config import DEFAULT_CONFIG  # noqa: E402
 
 AVAILABLE_TESTS = ("fragmentation", "thread-safety", "engine-hf", "throughput", "all")
 
+BENCHMARKS_DIR = Path(__file__).resolve().parent
 FRAGMENTATION_BIN = ROOT / "csrc" / "fragmentation_bench"
 THREAD_SAFETY_BIN = ROOT / "csrc" / "thread_safety_test"
-UNIFIED_BENCH = ROOT / "benchmark_comparison_unified.py"
-THROUGHPUT_BENCH = ROOT / "throughput_benchmark.py"
+UNIFIED_BENCH = BENCHMARKS_DIR / "benchmark_comparison_unified.py"
+THROUGHPUT_BENCH = BENCHMARKS_DIR / "throughput_benchmark.py"
 
 
 def build_parser() -> argparse.ArgumentParser:

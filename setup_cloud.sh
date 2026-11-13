@@ -19,5 +19,5 @@ snapshot_download(DEFAULT_CONFIG.model_name)
 
 mkdir -p "${ROOT_DIR}/results/cloud-smoke"
 HF_HUB_OFFLINE=1 PYTHONPATH="${ROOT_DIR}" "${PYTHON}" \
-  "${ROOT_DIR}/throughput_benchmark.py" --requests 5 \
-  --output-dir "${ROOT_DIR}/results/cloud-smoke"
+  "${ROOT_DIR}/run_suite.py" --profile smoke \
+  --results-dir "${ROOT_DIR}/results/cloud-smoke"
