@@ -120,15 +120,10 @@ class PagedKVCacheManager:
         chunks = []
         for seq, start, count in zip(sequences, start_tokens, token_counts):
             if seq.block_table is None:
-                continue
-            try:
-                chunk = self._sequence_slots(seq, start, count)
-                if chunk.numel() > 0:
-                    chunks.append(chunk)
-            except ValueError:
-                raise
-            except Exception:
-                continue
+                raise ValueError(f"Sequence {seq.seq_id} has no block table")
+            chunk = self._sequence_slots(seq, start, count)
+            if chunk.numel() > 0:
+                chunks.append(chunk)
         if not chunks:
             return torch.empty((0,), dtype=torch.long, device=self.device)
         return torch.cat(chunks)
@@ -203,7 +198,8 @@ class PagedKVCacheManager:
         key_token: torch.Tensor,
         value_token: torch.Tensor
     ) -> None:
-        assert seq.block_table is not None
+        if seq.block_table is None:
+            raise ValueError(f"Sequence {seq.seq_id} has no block table")
         token_index = seq.block_table.get_tokens_count() - 1
 
         slot_mapping = self.build_slot_mapping([seq], [token_index], [1])

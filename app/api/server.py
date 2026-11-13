@@ -22,9 +22,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_CONFIG.model_name)
 
-# Wall-clock timeout (seconds) for any single request. Sequences that exceed
-# this are swept by the step loop and their KV blocks freed. Set to 0 to
-# disable (not recommended — it is the only thing that bounds KV growth).
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "0"))
 
 model = None
@@ -32,6 +29,7 @@ tokenizer = None
 model_device: torch.device = torch.device("cpu")
 _step_task: Optional[asyncio.Task] = None
 step_event: Optional[asyncio.Event] = None
+sequence_events: dict[int, asyncio.Event] = {}
 
 
 def _admit(prompt_tokens: List[int], max_tokens: int) -> Sequence:
@@ -43,11 +41,15 @@ def _admit(prompt_tokens: List[int], max_tokens: int) -> Sequence:
             detail="KV cache is full; wait for running requests to finish and retry.",
         )
     deadline = (time.monotonic() + REQUEST_TIMEOUT_SECONDS) if REQUEST_TIMEOUT_SECONDS > 0 else None
-    sequence = engine.add_request(
-        prompt_token_ids=prompt_tokens,
-        max_tokens=max_tokens,
-        deadline=deadline,
-    )
+    try:
+        sequence = engine.add_request(
+            prompt_token_ids=prompt_tokens,
+            max_tokens=max_tokens,
+            deadline=deadline,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sequence_events[sequence.seq_id] = asyncio.Event()
     step_event.set()
     return sequence
 
@@ -77,15 +79,16 @@ def load_model(config: RuntimeConfig = DEFAULT_CONFIG) -> bool:
 
 @asynccontextmanager
 async def lifespan(app_):
-    global model, tokenizer, _step_task, step_event
+    global model, tokenizer, _step_task, step_event, sequence_events
     step_event = asyncio.Event()
+    sequence_events = {}
     if model is None:
         if not load_model(DEFAULT_CONFIG):
             logger.error("Fatal: Could not load model on startup")
             sys.exit(1)
     if engine is not None:
         engine.model = model
-        engine.update_event = step_event
+        engine.update_event = None
     _step_task = asyncio.create_task(_step_loop())
     yield
     if _step_task is not None:
@@ -142,7 +145,11 @@ async def _step_loop():
         if not engine.has_unfinished_requests():
             continue
         try:
-            await asyncio.to_thread(engine.step)
+            result = await asyncio.to_thread(engine.step)
+            for sequence in result.get("finished", []) + result.get("running", []):
+                event = sequence_events.get(sequence.seq_id)
+                if event is not None:
+                    event.set()
         except RuntimeError as e:
             logger.warning(f"Scheduler OOM, skipping step: {e}")
         except Exception as e:
@@ -165,6 +172,7 @@ def health():
 async def create_completion(request: CompletionRequest, raw: Request):
     prompt_tokens = tokenizer.encode(request.prompt, add_special_tokens=True)
     sequence = _admit(prompt_tokens, request.max_tokens)
+    sequence_event = sequence_events[sequence.seq_id]
 
     async def token_generator() -> AsyncGenerator[str, None]:
         last_yielded_count = 0
@@ -177,10 +185,10 @@ async def create_completion(request: CompletionRequest, raw: Request):
                     return
 
                 try:
-                    await asyncio.wait_for(engine.update_event.wait(), timeout=0.5)
+                    await asyncio.wait_for(sequence_event.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
-                engine.update_event.clear()
+                sequence_event.clear()
 
                 if sequence.deadline is not None and time.monotonic() >= sequence.deadline:
                     sequence.abandon_requested = True
@@ -202,6 +210,7 @@ async def create_completion(request: CompletionRequest, raw: Request):
                         }
                         yield json.dumps(payload)
         finally:
+            sequence_events.pop(sequence.seq_id, None)
             if not sequence.is_finished():
                 sequence.abandon_requested = True
                 step_event.set()
@@ -219,6 +228,7 @@ async def generate(req: GenerateRequest, raw: Request):
         raise HTTPException(status_code=400, detail="Prompt too long")
 
     sequence = _admit(prompt_tokens, req.max_tokens)
+    sequence_event = sequence_events[sequence.seq_id]
 
     try:
         while not sequence.is_finished():
@@ -228,10 +238,10 @@ async def generate(req: GenerateRequest, raw: Request):
                 raise HTTPException(status_code=499, detail="Client disconnected")
 
             try:
-                await asyncio.wait_for(step_event.wait(), timeout=5.0)
+                await asyncio.wait_for(sequence_event.wait(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
-            step_event.clear()
+            sequence_event.clear()
 
             if sequence.deadline is not None and time.monotonic() >= sequence.deadline:
                 sequence.abandon_requested = True
@@ -246,16 +256,20 @@ async def generate(req: GenerateRequest, raw: Request):
             "prompt_tokens": len(prompt_tokens),
         }
     except HTTPException:
+        sequence_events.pop(sequence.seq_id, None)
         if not sequence.is_finished():
             sequence.abandon_requested = True
             step_event.set()
         raise
     except Exception as e:
+        sequence_events.pop(sequence.seq_id, None)
         if not sequence.is_finished():
             sequence.abandon_requested = True
             step_event.set()
         logger.error(f"Generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+    finally:
+        sequence_events.pop(sequence.seq_id, None)
 
 
 @app.get("/metrics")

@@ -47,6 +47,21 @@ def test_single_token_kv_write(kv_manager):
     assert len(seq.block_table.get_physical_blocks()) == 2
 
 
+def test_single_token_kv_write_requires_block_table(kv_manager):
+    seq = Sequence(seq_id=4, prompt_token_ids=[1])
+    token = torch.zeros(1, 2, 8)
+
+    with pytest.raises(ValueError, match="no block table"):
+        kv_manager.write_single_token_kv(seq, token, token)
+
+
+def test_slot_mapping_rejects_sequence_without_block_table(kv_manager):
+    seq = Sequence(seq_id=5, prompt_token_ids=[1])
+
+    with pytest.raises(ValueError, match="no block table"):
+        kv_manager.build_slot_mapping([seq], [0], [1])
+
+
 def test_free_sequence(kv_manager):
     allocator = kv_manager.get_allocator()
     initial_free = allocator.get_num_free_blocks()

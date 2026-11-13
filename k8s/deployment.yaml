@@ -14,6 +14,7 @@ spec:
       labels:
         app: llm-engine
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
       - name: engine
         image: docker.io/library/llm-baseline:v1
@@ -23,6 +24,12 @@ spec:
         env:
         - name: MODEL_NAME
           value: "HuggingFaceTB/SmolLM-135M-Instruct"
+        - name: LLM_DEVICE
+          value: "cpu"
+        - name: LLM_DTYPE
+          value: "fp32"
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: "300"
         resources:
           limits:
             cpu: "2"
@@ -33,18 +40,23 @@ spec:
         volumeMounts:
         - name: hf-cache-storage
           mountPath: /root/.cache/huggingface
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          failureThreshold: 60
         readinessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 30
-          periodSeconds: 5
+          periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 10
+          periodSeconds: 20
+          failureThreshold: 3
       volumes:
       - name: hf-cache-storage
         persistentVolumeClaim:

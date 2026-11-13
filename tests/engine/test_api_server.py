@@ -94,6 +94,19 @@ def test_generate_rejects_when_kv_full():
         assert "full" in response.json()["detail"].lower()
 
 
+def test_generate_rejects_sequence_over_model_limit():
+    _build_engine()
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/generate",
+            json={"prompt": "a" * 2048, "max_tokens": 1},
+        )
+
+        assert response.status_code == 400
+        assert "max_model_len" in response.json()["detail"]
+
+
 def test_deadline_abandon_frees_kv_blocks():
     engine, manager = _build_engine()
     past = time.monotonic() - 10

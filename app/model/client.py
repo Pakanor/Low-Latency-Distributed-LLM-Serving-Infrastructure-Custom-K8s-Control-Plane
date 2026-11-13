@@ -1,6 +1,7 @@
 import urllib.request
 import json
 import base64
+import os
 import torch
 from typing import List, Optional, Dict, Tuple
 
@@ -44,10 +45,13 @@ def _deserialize_past_kv(data: List[Dict]) -> Tuple:
 class K8sModelClient:
     def __init__(
         self,
-        endpoint_url: str = "http://llm-engine-service.default.svc.cluster.local/generate_step",
+        endpoint_url: Optional[str] = None,
         model_name: Optional[str] = None,
     ) -> None:
-        self.endpoint_url = endpoint_url
+        self.endpoint_url = endpoint_url or os.getenv(
+            "LLM_MODEL_ENDPOINT",
+            "http://llm-engine-service.default.svc.cluster.local:8000/generate_step",
+        )
         self.model_name = model_name
         try:
             from transformers import AutoTokenizer
