@@ -14,6 +14,8 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <new>
+#include <limits>
 
 #ifndef LLM_INFRA_HIP_ENABLED
 #define LLM_INFRA_HIP_ENABLED 0
@@ -38,6 +40,8 @@ struct Block {
     int ref_count{0};
 };
 
+enum class CpuBlockState { FREE, USED };
+
 class PageAllocator {
 public:
     PageAllocator(size_t total_blocks, size_t tokens_per_block, size_t bytes_per_token,
@@ -55,8 +59,15 @@ public:
             throw std::invalid_argument("bytes_per_token must be greater than 0");
         }
 
+        if (tokens_per_block > std::numeric_limits<size_t>::max() / bytes_per_token) {
+            throw std::overflow_error("tokens_per_block * bytes_per_token overflows size_t");
+        }
         size_t block_size_bytes = tokens_per_block_ * bytes_per_token_;
+
         if (total_cpu_blocks_ > 0) {
+            if (total_cpu_blocks_ > std::numeric_limits<size_t>::max() / block_size_bytes) {
+                throw std::overflow_error("total_cpu_blocks * block_size_bytes overflows size_t");
+            }
             size_t total_ram_bytes = total_cpu_blocks_ * block_size_bytes;
             base_host_ptr_ = static_cast<uint8_t*>(backend_->allocate_host_block(total_ram_bytes));
             if (!base_host_ptr_) {
@@ -70,6 +81,7 @@ public:
         }
 
         cpu_block_ptrs_.resize(total_cpu_blocks_);
+        cpu_block_states_.resize(total_cpu_blocks_, CpuBlockState::FREE);
         for (size_t i = 0; i < total_cpu_blocks_; ++i) {
             cpu_free_blocks_.push_back(static_cast<int>(i));
             cpu_block_ptrs_[i] = base_host_ptr_ + (i * block_size_bytes);
@@ -92,6 +104,7 @@ public:
         }
         int block_id = free_blocks_.front();
         free_blocks_.pop();
+        cleanup_stale_cpu_mapping(block_id);
         blocks_[block_id].ref_count = 1;
         return block_id;
     }
@@ -106,10 +119,24 @@ public:
         for (size_t i = 0; i < count; ++i) {
             int block_id = free_blocks_.front();
             free_blocks_.pop();
+            cleanup_stale_cpu_mapping(block_id);
             blocks_[block_id].ref_count = 1;
             allocated.push_back(block_id);
         }
         return allocated;
+    }
+
+    void cleanup_stale_cpu_mapping(int gpu_block_id) {
+        auto it = gpu_to_cpu_map_.find(gpu_block_id);
+        if (it != gpu_to_cpu_map_.end()) {
+            int cpu_block_id = it->second;
+            if (static_cast<size_t>(cpu_block_id) < total_cpu_blocks_ &&
+                cpu_block_states_[cpu_block_id] == CpuBlockState::USED) {
+                cpu_block_states_[cpu_block_id] = CpuBlockState::FREE;
+                cpu_free_blocks_.push_back(cpu_block_id);
+            }
+            gpu_to_cpu_map_.erase(it);
+        }
     }
 
     void share_block(int block_id) {
@@ -125,13 +152,21 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(block_id);
 
-        if (blocks_[block_id].ref_count <= 0) {
-            auto swapped = gpu_to_cpu_map_.find(block_id);
-            if (swapped != gpu_to_cpu_map_.end()) {
-                cpu_free_blocks_.push_back(swapped->second);
-                gpu_to_cpu_map_.erase(swapped);
+      
+        auto it = gpu_to_cpu_map_.find(block_id);
+        if (it != gpu_to_cpu_map_.end()) {
+            int cpu_block_id = it->second;
+            if (blocks_[block_id].ref_count == 0 &&
+                static_cast<size_t>(cpu_block_id) < total_cpu_blocks_ &&
+                cpu_block_states_[cpu_block_id] == CpuBlockState::USED) {
+                cpu_block_states_[cpu_block_id] = CpuBlockState::FREE;
+                cpu_free_blocks_.push_back(cpu_block_id);
+                gpu_to_cpu_map_.erase(it);
                 return;
             }
+        }
+
+        if (blocks_[block_id].ref_count <= 0) {
             throw std::runtime_error("Double-free or free on unallocated block detected: ID " + std::to_string(block_id));
         }
 
@@ -149,45 +184,58 @@ public:
             throw std::runtime_error("Cannot swap out block with ref_count != 1");
         }
 
+        if (total_cpu_blocks_ == 0) {
+            throw std::runtime_error("Swap unsupported: no host pool configured (total_cpu_blocks == 0)");
+        }
+
         if (cpu_free_blocks_.empty()) {
             throw std::runtime_error("OOM: Host RAM Block Pool exhausted during swap out");
         }
 
-        if (gpu_to_cpu_map_.find(gpu_block_id) != gpu_to_cpu_map_.end()) {
-            throw std::runtime_error("Block is already swapped out: " + std::to_string(gpu_block_id));
-        }
-
         int cpu_block_id = cpu_free_blocks_.back();
         cpu_free_blocks_.pop_back();
-
-        gpu_to_cpu_map_[gpu_block_id] = cpu_block_id;
+        cpu_block_states_[cpu_block_id] = CpuBlockState::USED;
 
         blocks_[gpu_block_id].ref_count = 0;
         free_blocks_.push(gpu_block_id);
 
+        gpu_to_cpu_map_[gpu_block_id] = cpu_block_id;
+
         return cpu_block_id;
     }
 
-    int swap_in(int gpu_block_id) {
+    int swap_in(int cpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_block_id(gpu_block_id);
 
-        auto it = gpu_to_cpu_map_.find(gpu_block_id);
-        if (it == gpu_to_cpu_map_.end()) {
-            throw std::runtime_error("Block ID " + std::to_string(gpu_block_id) + " not found in Host RAM mapping");
+        if (total_cpu_blocks_ == 0) {
+            throw std::runtime_error("Swap unsupported: no host pool configured (total_cpu_blocks == 0)");
+        }
+
+        if (static_cast<size_t>(cpu_block_id) >= total_cpu_blocks_) {
+            throw std::out_of_range("CPU block ID out of range: " + std::to_string(cpu_block_id));
+        }
+        if (cpu_block_states_[cpu_block_id] != CpuBlockState::USED) {
+            throw std::runtime_error("CPU block " + std::to_string(cpu_block_id) + " is not currently swapped out");
         }
 
         if (free_blocks_.empty()) {
-            throw std::runtime_error("OOM: No free VRAM blocks available to swap in block " + std::to_string(gpu_block_id));
+            throw std::runtime_error("OOM: No free VRAM blocks available to swap in");
         }
 
         int new_vram_block = free_blocks_.front();
         free_blocks_.pop();
         blocks_[new_vram_block].ref_count = 1;
 
-        int cpu_block_id = it->second;
+        cpu_block_states_[cpu_block_id] = CpuBlockState::FREE;
         cpu_free_blocks_.push_back(cpu_block_id);
-        gpu_to_cpu_map_.erase(it);
+
+        // Find and remove the reverse mapping
+        for (auto it = gpu_to_cpu_map_.begin(); it != gpu_to_cpu_map_.end(); ++it) {
+            if (it->second == cpu_block_id) {
+                gpu_to_cpu_map_.erase(it);
+                break;
+            }
+        }
 
         return new_vram_block;
     }
@@ -202,25 +250,55 @@ public:
         return it->second;
     }
 
-    void release_swapped_block(int gpu_block_id) {
+    void release_swapped_block(int cpu_block_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_block_id(gpu_block_id);
-        auto it = gpu_to_cpu_map_.find(gpu_block_id);
-        if (it == gpu_to_cpu_map_.end()) {
-            throw std::runtime_error("Block " + std::to_string(gpu_block_id) + " is not swapped out");
+
+        if (total_cpu_blocks_ == 0) {
+            throw std::runtime_error("Swap unsupported: no host pool configured (total_cpu_blocks == 0)");
         }
-        cpu_free_blocks_.push_back(it->second);
-        gpu_to_cpu_map_.erase(it);
+
+        if (static_cast<size_t>(cpu_block_id) >= total_cpu_blocks_) {
+            throw std::out_of_range("CPU block ID out of range: " + std::to_string(cpu_block_id));
+        }
+        if (cpu_block_states_[cpu_block_id] != CpuBlockState::USED) {
+            throw std::runtime_error("CPU block " + std::to_string(cpu_block_id) + " is not currently swapped out");
+        }
+
+        cpu_block_states_[cpu_block_id] = CpuBlockState::FREE;
+        cpu_free_blocks_.push_back(cpu_block_id);
+
+        for (auto it = gpu_to_cpu_map_.begin(); it != gpu_to_cpu_map_.end(); ++it) {
+            if (it->second == cpu_block_id) {
+                gpu_to_cpu_map_.erase(it);
+                break;
+            }
+        }
     }
 
-    uintptr_t get_host_ptr(int gpu_block_id) const {
+    uintptr_t get_host_ptr(int cpu_block_id) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_block_id(gpu_block_id);
-        auto it = gpu_to_cpu_map_.find(gpu_block_id);
-        if (it == gpu_to_cpu_map_.end()) {
+
+        if (static_cast<size_t>(cpu_block_id) >= total_cpu_blocks_) {
+            throw std::out_of_range("CPU block ID out of range: " + std::to_string(cpu_block_id));
+        }
+        if (cpu_block_states_[cpu_block_id] != CpuBlockState::USED) {
             return 0;
         }
-        return reinterpret_cast<uintptr_t>(cpu_block_ptrs_[it->second]);
+        return reinterpret_cast<uintptr_t>(cpu_block_ptrs_[cpu_block_id]);
+    }
+
+    
+    [[deprecated("Returns host pool base pointer; use get_host_ptr(cpu_block_id) for per-block access")]]
+    uintptr_t get_device_ptr(int gpu_block_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_block_id(gpu_block_id);
+        if (!backend_->is_zero_copy() || !base_host_ptr_) {
+            return 0;
+        }
+        if (auto* hip_backend = dynamic_cast<const HipZeroCopyMemoryBackend*>(backend_.get())) {
+            return hip_backend->get_device_view(base_host_ptr_);
+        }
+        return reinterpret_cast<uintptr_t>(base_host_ptr_);
     }
 
     size_t get_block_size() const { return tokens_per_block_; }
@@ -265,18 +343,6 @@ public:
         return backend_->is_zero_copy();
     }
 
-    uintptr_t get_device_ptr(int gpu_block_id) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        validate_block_id(gpu_block_id);
-        if (!backend_->is_zero_copy() || !base_host_ptr_) {
-            return 0;
-        }
-        if (auto* hip_backend = dynamic_cast<const HipZeroCopyMemoryBackend*>(backend_.get())) {
-            return hip_backend->get_device_view(base_host_ptr_);
-        }
-        return reinterpret_cast<uintptr_t>(base_host_ptr_);
-    }
-
     double get_utilization_percentage() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (total_blocks_ == 0) return 0.0;
@@ -298,6 +364,7 @@ private:
 
     std::unique_ptr<MemoryBackend> backend_;
     std::vector<void*> cpu_block_ptrs_;
+    std::vector<CpuBlockState> cpu_block_states_;
 
     std::vector<Block> blocks_;
     std::queue<int> free_blocks_;
@@ -308,13 +375,13 @@ private:
 
 class SequenceBlockTable {
 public:
-    explicit SequenceBlockTable(PageAllocator& allocator) 
+    explicit SequenceBlockTable(PageAllocator& allocator)
         : allocator_(&allocator), block_size_(allocator.get_block_size()) {}
 
     SequenceBlockTable(const SequenceBlockTable&) = delete;
     SequenceBlockTable& operator=(const SequenceBlockTable&) = delete;
 
-    SequenceBlockTable(SequenceBlockTable&& other) noexcept 
+    SequenceBlockTable(SequenceBlockTable&& other) noexcept
         : allocator_(other.allocator_),
           block_size_(other.block_size_),
           tokens_count_(other.tokens_count_),
@@ -341,11 +408,13 @@ public:
     }
 
     void append_block(int block_id) {
+        check_not_moved();
         validate_block_id(block_id);
         physical_blocks_.push_back(block_id);
     }
 
     void replace_block(int old_block_id, int new_block_id) {
+        check_not_moved();
         validate_block_id(new_block_id);
         auto it = std::find(physical_blocks_.begin(), physical_blocks_.end(), old_block_id);
         if (it == physical_blocks_.end()) {
@@ -354,9 +423,11 @@ public:
         *it = new_block_id;
     }
 
-    void append_token(PageAllocator& allocator) {
+    void append_token() {
+        check_not_moved();
         if (tokens_count_ % block_size_ == 0) {
-            int new_block = allocator.allocate_block();
+            physical_blocks_.reserve(physical_blocks_.size() + 1);
+            int new_block = allocator_->allocate_block();
             physical_blocks_.push_back(new_block);
         }
         tokens_count_++;
@@ -366,10 +437,21 @@ public:
         release_internal();
     }
 
-    const std::vector<int>& get_physical_blocks() const { return physical_blocks_; }
-    size_t get_tokens_count() const { return tokens_count_; }
+    const std::vector<int>& get_physical_blocks() const {
+        return physical_blocks_;
+    }
+
+    size_t get_tokens_count() const {
+        return tokens_count_;
+    }
 
 private:
+    void check_not_moved() const {
+        if (allocator_ == nullptr) {
+            throw std::logic_error("SequenceBlockTable used after move");
+        }
+    }
+
     void validate_block_id(int block_id) const {
         if (block_id < 0 || static_cast<size_t>(block_id) >= allocator_->get_total_blocks()) {
             throw std::out_of_range("Block ID out of range: " + std::to_string(block_id));
