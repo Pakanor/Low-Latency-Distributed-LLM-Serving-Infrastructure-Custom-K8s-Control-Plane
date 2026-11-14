@@ -12,109 +12,26 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <memory>
 #include <string>
 
 #ifndef LLM_INFRA_HIP_ENABLED
 #define LLM_INFRA_HIP_ENABLED 0
 #endif
 
-#if LLM_INFRA_HIP_ENABLED
-#include <hip/hip_runtime_api.h>
-#endif
+#include "memory_backend.hpp"
+#include "cpu_memory_backend.hpp"
+#include "hip_zero_copy_memory_backend.hpp"
 
 namespace llm_infra {
 
-class MappedHostBuffer {
-public:
-    MappedHostBuffer() = default;
-
-    ~MappedHostBuffer() { release(); }
-
-    MappedHostBuffer(const MappedHostBuffer&) = delete;
-    MappedHostBuffer& operator=(const MappedHostBuffer&) = delete;
-    MappedHostBuffer(MappedHostBuffer&&) = delete;
-    MappedHostBuffer& operator=(MappedHostBuffer&&) = delete;
-
-    void allocate(size_t size) {
-        if (size == 0) {
-            throw std::invalid_argument("MappedHostBuffer size must be greater than 0");
-        }
-        if (ptr_ != nullptr) {
-            release();
-        }
-        size_ = size;
-        if (!allocate_mapped(&ptr_)) {
-            allocate_aligned(&ptr_);
-        }
-    }
-
-    void* host_ptr() const { return ptr_; }
-    uintptr_t device_ptr() const { return device_ptr_; }
-    size_t size() const { return size_; }
-    bool is_mapped() const { return mapped_; }
-
-private:
-    bool allocate_mapped(void** out) {
+inline std::unique_ptr<MemoryBackend> make_default_memory_backend() {
 #if LLM_INFRA_HIP_ENABLED
-        if (hipError_t err = hipHostMalloc(out, size_, hipHostMallocMapped); err != hipSuccess) {
-            std::cerr << "[llm_infra] hipHostMalloc(" << size_ << " bytes) failed: "
-                      << hipGetErrorString(err) << " - falling back to page-aligned host memory" << std::endl;
-            *out = nullptr;
-            return false;
-        }
-        void* device_view = nullptr;
-        if (hipError_t err = hipHostGetDevicePointer(&device_view, *out, 0); err != hipSuccess || device_view == nullptr) {
-            std::cerr << "[llm_infra] hipHostGetDevicePointer failed: " << hipGetErrorString(err)
-                      << " - falling back to page-aligned host memory" << std::endl;
-            hipFreeHost(*out);
-            *out = nullptr;
-            return false;
-        }
-        device_ptr_ = reinterpret_cast<uintptr_t>(device_view);
-        mapped_ = true;
-        return true;
+    return std::make_unique<HipZeroCopyMemoryBackend>();
 #else
-        (void)out;
-        return false;
+    return std::make_unique<CpuMemoryBackend>();
 #endif
-    }
-
-    void allocate_aligned(void** out) {
-        int ret = posix_memalign(out, kHostAlignment, size_);
-        if (ret != 0 || *out == nullptr) {
-            *out = nullptr;
-            throw std::bad_alloc();
-        }
-        device_ptr_ = 0;
-        mapped_ = false;
-    }
-
-    void release() {
-        if (ptr_ == nullptr) {
-            return;
-        }
-        bool released = false;
-#if LLM_INFRA_HIP_ENABLED
-        if (mapped_) {
-            released = hipFreeHost(ptr_) == hipSuccess;
-        }
-#endif
-        if (!released) {
-            free(ptr_);
-        }
-        ptr_ = nullptr;
-        device_ptr_ = 0;
-        mapped_ = false;
-        size_ = 0;
-    }
-
-    static constexpr size_t kHostAlignment = 4096;
-
-    void* ptr_{nullptr};
-    uintptr_t device_ptr_{0};
-    size_t size_{0};
-    bool mapped_{false};
-};
+}
 
 struct Block {
     int id;
@@ -123,8 +40,14 @@ struct Block {
 
 class PageAllocator {
 public:
-    PageAllocator(size_t total_blocks, size_t tokens_per_block, size_t bytes_per_token, size_t total_cpu_blocks = 32)
-        : total_blocks_(total_blocks), tokens_per_block_(tokens_per_block), bytes_per_token_(bytes_per_token), total_cpu_blocks_(total_cpu_blocks) {
+    PageAllocator(size_t total_blocks, size_t tokens_per_block, size_t bytes_per_token,
+                  size_t total_cpu_blocks = 32,
+                  std::unique_ptr<MemoryBackend> backend = nullptr)
+        : total_blocks_(total_blocks),
+          tokens_per_block_(tokens_per_block),
+          bytes_per_token_(bytes_per_token),
+          total_cpu_blocks_(total_cpu_blocks),
+          backend_(backend ? std::move(backend) : make_default_memory_backend()) {
         if (tokens_per_block == 0) {
             throw std::invalid_argument("tokens_per_block must be greater than 0");
         }
@@ -133,13 +56,13 @@ public:
         }
 
         size_t block_size_bytes = tokens_per_block_ * bytes_per_token_;
-        size_t total_ram_bytes = total_cpu_blocks_ * block_size_bytes;
-        int ret = posix_memalign(reinterpret_cast<void**>(&base_host_ptr_), 4096, total_ram_bytes);
-        if (ret != 0 || !base_host_ptr_) {
-            throw std::bad_alloc();
+        if (total_cpu_blocks_ > 0) {
+            size_t total_ram_bytes = total_cpu_blocks_ * block_size_bytes;
+            base_host_ptr_ = static_cast<uint8_t*>(backend_->allocate_host_block(total_ram_bytes));
+            if (!base_host_ptr_) {
+                throw std::bad_alloc();
+            }
         }
-
-        uint8_t* byte_ptr = base_host_ptr_;
 
         for (size_t i = 0; i < total_blocks_; ++i) {
             free_blocks_.push(static_cast<int>(i));
@@ -149,13 +72,13 @@ public:
         cpu_block_ptrs_.resize(total_cpu_blocks_);
         for (size_t i = 0; i < total_cpu_blocks_; ++i) {
             cpu_free_blocks_.push_back(static_cast<int>(i));
-            cpu_block_ptrs_[i] = byte_ptr + (i * block_size_bytes);
+            cpu_block_ptrs_[i] = base_host_ptr_ + (i * block_size_bytes);
         }
     }
 
     ~PageAllocator() {
         if (base_host_ptr_) {
-            free(base_host_ptr_);
+            backend_->free_host_block(base_host_ptr_);
             base_host_ptr_ = nullptr;
         }
     }
@@ -339,16 +262,19 @@ public:
 
     bool is_zero_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return host_pool_.is_mapped();
+        return backend_->is_zero_copy();
     }
 
     uintptr_t get_device_ptr(int gpu_block_id) const {
         std::lock_guard<std::mutex> lock(mutex_);
         validate_block_id(gpu_block_id);
-        if (host_pool_.is_mapped()) {
-            return host_pool_.device_ptr();
+        if (!backend_->is_zero_copy() || !base_host_ptr_) {
+            return 0;
         }
-        return 0;
+        if (auto* hip_backend = dynamic_cast<const HipZeroCopyMemoryBackend*>(backend_.get())) {
+            return hip_backend->get_device_view(base_host_ptr_);
+        }
+        return reinterpret_cast<uintptr_t>(base_host_ptr_);
     }
 
     double get_utilization_percentage() const {
@@ -364,15 +290,13 @@ private:
         }
     }
 
-    uint8_t* host_base() const { return static_cast<uint8_t*>(host_pool_.host_ptr()); }
-
     size_t total_blocks_;
     size_t tokens_per_block_;
     size_t bytes_per_token_;
     size_t total_cpu_blocks_;
     uint8_t* base_host_ptr_{nullptr};
 
-    MappedHostBuffer host_pool_;
+    std::unique_ptr<MemoryBackend> backend_;
     std::vector<void*> cpu_block_ptrs_;
 
     std::vector<Block> blocks_;
@@ -417,16 +341,12 @@ public:
     }
 
     void append_block(int block_id) {
-        if (block_id < 0 || static_cast<size_t>(block_id) >= allocator_->get_total_blocks()) {
-            throw std::out_of_range("Block ID out of range: " + std::to_string(block_id));
-        }
+        validate_block_id(block_id);
         physical_blocks_.push_back(block_id);
     }
 
     void replace_block(int old_block_id, int new_block_id) {
-        if (new_block_id < 0 || static_cast<size_t>(new_block_id) >= allocator_->get_total_blocks()) {
-            throw std::out_of_range("Block ID out of range: " + std::to_string(new_block_id));
-        }
+        validate_block_id(new_block_id);
         auto it = std::find(physical_blocks_.begin(), physical_blocks_.end(), old_block_id);
         if (it == physical_blocks_.end()) {
             throw std::runtime_error("Block ID " + std::to_string(old_block_id) + " not found in block table");
@@ -442,18 +362,20 @@ public:
         tokens_count_++;
     }
 
-    void release(PageAllocator& allocator) {
-        for (int block_id : physical_blocks_) {
-            allocator.free_block(block_id);
-        }
-        physical_blocks_.clear();
-        tokens_count_ = 0;
+    void release() {
+        release_internal();
     }
 
     const std::vector<int>& get_physical_blocks() const { return physical_blocks_; }
     size_t get_tokens_count() const { return tokens_count_; }
 
 private:
+    void validate_block_id(int block_id) const {
+        if (block_id < 0 || static_cast<size_t>(block_id) >= allocator_->get_total_blocks()) {
+            throw std::out_of_range("Block ID out of range: " + std::to_string(block_id));
+        }
+    }
+
     void release_internal() {
         if (allocator_ != nullptr) {
             for (int block_id : physical_blocks_) {
