@@ -99,7 +99,7 @@ class PagedKVCacheManager:
 
     def free_sequence(self, seq: Sequence) -> None:
         if seq.block_table is not None:
-            seq.block_table.release(self.allocator)
+            seq.block_table.release()
             seq.block_table = None
 
     def build_slot_mapping(

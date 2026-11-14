@@ -108,9 +108,7 @@ PYBIND11_MODULE(llm_allocator_cpp, m) {
         .def(py::init<llm_infra::PageAllocator&>(), py::arg("allocator"), py::keep_alive<1, 2>())
         .def("append_token", &llm_infra::SequenceBlockTable::append_token, py::arg("allocator"), py::call_guard<py::gil_scoped_release>())
         .def("append_block", &llm_infra::SequenceBlockTable::append_block, py::arg("block_id"))
-        .def("release", [](llm_infra::SequenceBlockTable& self, llm_infra::PageAllocator& alloc) {
-            self.release(alloc);
-        }, py::arg("allocator"), py::call_guard<py::gil_scoped_release>())
+        .def("release", &llm_infra::SequenceBlockTable::release, py::call_guard<py::gil_scoped_release>())
         .def("replace_block", &llm_infra::SequenceBlockTable::replace_block,
              py::arg("old_block_id"), py::arg("new_block_id"))
         .def("get_physical_blocks", &llm_infra::SequenceBlockTable::get_physical_blocks)

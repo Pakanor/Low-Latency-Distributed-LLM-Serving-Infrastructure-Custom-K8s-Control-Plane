@@ -63,7 +63,7 @@ def test_client_abort_mid_generation():
 
     seq.status = SequenceStatus.FINISHED
     if seq.block_table is not None:
-        seq.block_table.release(kv_mgr.get_allocator())
+        seq.block_table.release()
         seq.block_table = None
 
     res = engine.step()
