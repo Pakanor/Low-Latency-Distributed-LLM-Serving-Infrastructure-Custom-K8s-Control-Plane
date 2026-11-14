@@ -15,9 +15,8 @@
 // indicate a real bug.
 //
 // Usage:
-//   g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -I../include \
-//       thread_safety_test.cpp -o thread_safety_test
-//   ./thread_safety_test
+//   g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -I../include thread_safety_test.cpp -o thread_safety_test
+//   run: ./thread_safety_test
 
 #include <atomic>
 #include <chrono>

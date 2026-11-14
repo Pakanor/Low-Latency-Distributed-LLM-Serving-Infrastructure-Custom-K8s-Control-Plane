@@ -9,6 +9,8 @@ lib/
 # --- Object files & Compiled Binaries ---
 fragmentation_bench
 thread_safety_test
+allocator_test
+allocator_audit_test
 *.o
 *.obj
 *.a
