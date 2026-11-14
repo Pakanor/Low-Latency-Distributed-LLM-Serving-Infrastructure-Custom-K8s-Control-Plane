@@ -1,7 +1,7 @@
 import torch
 import llm_allocator_cpp
 from typing import List, Tuple, Optional, Union
-from app.scheduler.sequence import Sequence, SequenceStatus
+from app.scheduler.sequence import Sequence
 from app.memory.strategies import (
     KVCacheMemoryStrategy,
     detect_strategy,
@@ -67,7 +67,6 @@ class PagedKVCacheManager:
         self.allocator = llm_allocator_cpp.PageAllocator(
             total_blocks, block_size, bytes_per_token, total_cpu_blocks
         )
-        self.swapped_seqs = set()
 
         self.key_cache, self.value_cache = self.strategy.allocate_cache(
             total_blocks, block_size, num_layers, num_heads, head_dim, dtype
@@ -91,11 +90,11 @@ class PagedKVCacheManager:
         tokens_count = seq.block_table.get_tokens_count()
         needed_tokens = seq.total_len - tokens_count
         for _ in range(needed_tokens):
-            seq.block_table.append_token(self.allocator)
+            seq.block_table.append_token()
 
     def allocate_slot_for_next_token(self, seq: Sequence) -> None:
         assert seq.block_table is not None
-        seq.block_table.append_token(self.allocator)
+        seq.block_table.append_token()
 
     def free_sequence(self, seq: Sequence) -> None:
         if seq.block_table is not None:
@@ -332,27 +331,3 @@ class PagedKVCacheManager:
 
         offset = start_token - (first_block * self.block_size)
         return all_slots[offset:offset + token_count]
-
-    def swap_out_sequence(self, seq: Sequence) -> None:
-        assert seq.block_table is not None
-        physical_blocks = seq.block_table.get_physical_blocks()
-
-        if self.strategy.requires_copy_on_swap:
-            pass
-
-        for block_id in physical_blocks:
-            self.allocator.swap_out(block_id)
-        self.swapped_seqs.add(seq.seq_id)
-        seq.status = SequenceStatus.SWAPPED
-
-    def swap_in_sequence(self, seq: Sequence) -> None:
-        assert seq.block_table is not None
-        old_physical_blocks = seq.block_table.get_physical_blocks()
-        new_physical_blocks = []
-        for block_id in old_physical_blocks:
-            new_block = self.allocator.swap_in(block_id)
-            new_physical_blocks.append(new_block)
-        for old_id, new_id in zip(old_physical_blocks, new_physical_blocks):
-            seq.block_table.replace_block(old_id, new_id)
-        self.swapped_seqs.discard(seq.seq_id)
-        seq.status = SequenceStatus.RUNNING
