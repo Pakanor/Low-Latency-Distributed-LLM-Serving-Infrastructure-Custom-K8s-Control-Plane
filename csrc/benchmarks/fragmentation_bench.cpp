@@ -244,7 +244,7 @@ int main() {
                     }
 
                     // contiguous: need +1 token worth of bytes right after current block
-                    size_t add_bytes = static_cast<size_t>(std::ceil(1.0 * BYTES_PER_TOKEN));
+                    (void)static_cast<size_t>(std::ceil(1.0 * BYTES_PER_TOKEN));
                     size_t needed_total = static_cast<size_t>(std::ceil(static_cast<double>(s.tokens) * BYTES_PER_TOKEN));
                     if (needed_total > s.contig_bytes) {
                         // try to extend in place: only possible if contiguous space right after
