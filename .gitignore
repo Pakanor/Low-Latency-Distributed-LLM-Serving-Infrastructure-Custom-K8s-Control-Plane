@@ -72,3 +72,7 @@ __pycache__/
 *.pyc
 *.log
 logs/
+
+# Bench results (Slice 2, generated)
+bench/results/
+bench/traces/*.jsonl
