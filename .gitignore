@@ -75,4 +75,4 @@ logs/
 
 # Bench results (Slice 2, generated)
 bench/results/
-bench/traces/*.jsonl
+bench/traces/

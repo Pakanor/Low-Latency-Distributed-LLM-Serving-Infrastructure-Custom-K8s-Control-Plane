@@ -33,4 +33,15 @@ else
 fi
 
 "$PY" -c "from bench.common import log_cpu_freqs; from pathlib import Path; log_cpu_freqs(Path('$OUT_DIR/cpu_freq.csv'),'after')"
+
+# Krok 2: trace'y obciążenia (generowane deterministycznie; identyczne dla każdego wariantu)
+if [[ "${SKIP_TRACES:-0}" != "1" ]]; then
+  "$PY" bench/make_trace.py --out-dir "$ROOT/bench/traces" \
+    --seed 42 --max-model-len 2048 --num-requests 300 \
+    --input-grid 128,512,1536 --output-grid 128,512
+  cp -r "$ROOT/bench/traces" "$OUT_DIR/traces"
+else
+  echo "[bench] skipping traces (SKIP_TRACES=1)"
+fi
+
 echo "[bench] done -> $OUT_DIR"
